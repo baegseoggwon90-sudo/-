@@ -4,3 +4,5 @@ imageio-ffmpeg>=0.4.9
 anthropic>=1.8
 # (선택) 음성 자동 인식 — 자막 파일이 없을 때 나레이션을 글자로 바꿉니다. 용량이 커서 기본 설치에서 뺐습니다.
 # faster-whisper>=1.0
+# CapCut 초안(편집 프로젝트) 만들기
+pycapcut>=0.0.3

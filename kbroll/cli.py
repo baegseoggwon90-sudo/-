@@ -74,6 +74,32 @@ def cmd_replace(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_capcut(args: argparse.Namespace) -> int:
+    from .capcut import default_draft_folder, export_draft
+    from .matcher import load_subtitles
+    from .replace import SubtitleOptions, assign_clips, parse_region
+    from .ffmpeg_util import list_media
+    from .segments import load_segments, parse_segments
+
+    if os.path.exists(args.segments):
+        segments = load_segments(args.segments)
+    else:
+        segments = parse_segments(args.segments.replace(";", "\n").replace("-", ","))
+    folder = args.drafts or default_draft_folder()
+    if not folder:
+        raise ValueError("CapCut 초안 폴더를 찾지 못했습니다. --drafts 로 지정하세요 "
+                         "(CapCut > 설정 > 초안 위치).")
+    subs = SubtitleOptions(mode=args.subtitle, region=parse_region(args.sub_region),
+                           threshold=args.sub_threshold, outline=args.sub_outline, dark=args.sub_dark)
+    plan = assign_clips(segments, list_media(args.clips) if args.clips else [], clips_dir=args.clips,
+                        shuffle=args.shuffle, seed=args.seed)
+    captions = load_subtitles(args.srt) if args.srt else None
+    name = args.name or os.path.splitext(os.path.basename(args.video))[0] + "_한국영상"
+    result = export_draft(args.video, plan, folder, name, subs, captions=captions)
+    print(f"CapCut 을 열면 초안 '{result.draft_name}' 이(가) 있습니다.")
+    return 0
+
+
 def cmd_web(args: argparse.Namespace) -> int:
     from .web import serve
 
@@ -128,6 +154,23 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--preset", default="medium", help="인코딩 속도 (ultrafast~veryslow)")
     r.set_defaults(func=cmd_replace)
 
+    c = sub.add_parser("capcut", help="교체 결과를 CapCut 초안(편집 프로젝트)으로 만들기 (pycapcut)")
+    c.add_argument("video", help="원본 영상")
+    c.add_argument("segments", help="구간 파일(segments.csv) 또는 '1:10-1:18;2:00-2:05' 형식")
+    c.add_argument("--clips", help="한국 영상(또는 사진) 폴더")
+    c.add_argument("--drafts", help="CapCut 초안 폴더 (기본: 자동으로 찾음)")
+    c.add_argument("--name", help="초안 이름 (기본: 원본이름_한국영상)")
+    c.add_argument("--subtitle", choices=["key", "band", "text", "none"], default="key",
+                   help="자막 보존: key=글자만(투명 영상), band=자막 띠, text=CapCut 텍스트(--srt 필요), none")
+    c.add_argument("--srt", help="나레이션 자막 파일 (text 방식에 사용)")
+    c.add_argument("--sub-region", default="0,0.72,1,0.28", help="자막 영역 x,y,w,h (화면 비율)")
+    c.add_argument("--sub-threshold", type=int, default=200)
+    c.add_argument("--sub-outline", type=int, default=4)
+    c.add_argument("--sub-dark", type=int, default=80)
+    c.add_argument("--shuffle", action="store_true")
+    c.add_argument("--seed", type=int)
+    c.set_defaults(func=cmd_capcut)
+
     w = sub.add_parser("web", help="브라우저에서 쓰는 편집 화면 실행 (기본)")
     w.add_argument("--workdir", help="작업 폴더 (기본: 홈폴더/kbroll_작업)")
     w.add_argument("--port", type=int, default=8765, help="포트 번호 (기본 8765)")
@@ -148,6 +191,6 @@ def main(argv: list[str] | None = None) -> int:
         args.func = cmd_web
     try:
         return args.func(args)
-    except (FFmpegError, ValueError, OSError) as exc:
+    except (FFmpegError, ValueError, OSError, RuntimeError) as exc:
         print(f"오류: {exc}", file=sys.stderr)
         return 1

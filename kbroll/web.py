@@ -24,8 +24,11 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import ffmpeg_util, matcher
 from .ai import DEFAULT_MODEL, AIError, Claude
+from .capcut import (CAPCUT_SUB_MODES, CapCutError, capcut_available, default_draft_folder,
+                     export_draft, open_folder)
 from .ffmpeg_util import IMAGE_EXTS, VIDEO_EXTS
-from .replace import SUBTITLE_MODES, SubtitleOptions, preview_frame, replace_segments
+from .replace import (SUBTITLE_MODES, SubtitleOptions, assign_clips, preview_frame,
+                      replace_segments)
 from .scan import analyze
 from .segments import Segment, normalize
 
@@ -100,6 +103,7 @@ class Project:
         data.setdefault("anthropic_key", "")
         data.setdefault("pixabay_key", "")
         data.setdefault("model", "")
+        data.setdefault("capcut_folder", "")
         return data
 
     def save_settings(self, data: dict) -> None:
@@ -153,6 +157,8 @@ class Project:
             "anthropic": bool(settings["anthropic_key"] or os.environ.get("ANTHROPIC_API_KEY")),
             "pixabay": bool(settings["pixabay_key"] or os.environ.get("PIXABAY_API_KEY")),
             "whisper": matcher.whisper_available(),
+            "capcut": capcut_available(),
+            "capcut_folder": settings.get("capcut_folder") or default_draft_folder() or "",
         }
         return {"source": source, "clips": clips, "scenes": self.state["scenes"],
                 "saved": self.state["saved"], "outputs": outputs, "job": self.job_view(),
@@ -160,7 +166,8 @@ class Project:
                 "recommend": self.state.get("recommend"), "ai": ai}
 
     def job_view(self) -> dict:
-        return {k: self.job.get(k) for k in ("kind", "status", "progress", "log", "error", "output")}
+        return {k: self.job.get(k) for k in ("kind", "status", "progress", "log", "error", "output",
+                                             "draft_name", "draft_path")}
 
     def run_scan(self, source: str, threshold: float, min_length: float, log, progress) -> None:
         project = self
@@ -236,6 +243,25 @@ def make_render_work(project: "Project", segments: list[Segment], subs: Subtitle
                 os.unlink(tmp_out)
 
     return out_name, work
+
+
+def make_capcut_work(project: "Project", segments: list[Segment], subs: SubtitleOptions,
+                     folder: str, draft_name: str, shuffle: bool):
+    """CapCut 초안 만들기 작업 함수."""
+    source = project.source_path()
+
+    def work(log, progress) -> None:
+        clip_files = ffmpeg_util.list_media(project.path("clips"))
+        plan = assign_clips(segments, clip_files, clips_dir=project.path("clips"), shuffle=shuffle)
+        captions = matcher.load_subtitles(project.subtitle_path()) if project.subtitle_path() else None
+        result = export_draft(source, plan, folder, draft_name, subs, captions=captions,
+                              log=log, progress=progress)
+        project.job["draft_path"] = result.draft_path
+        project.job["draft_name"] = result.draft_name
+        log(f"완료! CapCut 을 열면 초안 목록에 '{result.draft_name}' 이(가) 있습니다. "
+            "(안 보이면 CapCut 을 껐다 켜세요)")
+
+    return work
 
 
 def mask_key(key: str | None) -> str:
@@ -326,13 +352,15 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/delete": self.api_delete,
                 "/api/settings": self.api_settings,
                 "/api/auto": self.api_auto,
+                "/api/capcut": self.api_capcut,
+                "/api/open-draft": self.api_open_draft,
             }.get(route)
             if not handler:
                 return self.send_error_json("없는 주소입니다", 404)
             handler(body)
         except (ValueError, KeyError, TypeError) as exc:
             self.send_error_json(str(exc))
-        except (ffmpeg_util.FFmpegError, AIError) as exc:
+        except (ffmpeg_util.FFmpegError, AIError, CapCutError) as exc:
             self.send_error_json(str(exc), 500)
 
     # ---- 파일 전송 (영상 탐색을 위해 Range 지원) ----
@@ -462,12 +490,12 @@ class Handler(BaseHTTPRequestHandler):
     def api_settings(self, body: dict) -> None:
         project = self.project
         data = project.settings()
-        for key in ("anthropic_key", "pixabay_key", "model"):
+        for key in ("anthropic_key", "pixabay_key", "model", "capcut_folder"):
             value = body.get(key)
             if value is None:
                 continue
             value = str(value).strip()
-            if key != "model" and value and value == mask_key(data[key]):
+            if key.endswith("_key") and value and value == mask_key(data[key]):
                 continue  # 화면에 가려서 보여준 값을 그대로 다시 보낸 경우 → 기존 키 유지
             data[key] = value
         project.save_settings(data)
@@ -478,6 +506,8 @@ class Handler(BaseHTTPRequestHandler):
         return {"anthropic_key": mask_key(data["anthropic_key"]),
                 "pixabay_key": mask_key(data["pixabay_key"]),
                 "model": data["model"] or DEFAULT_MODEL,
+                "capcut_folder": data["capcut_folder"],
+                "capcut_detected": default_draft_folder() or "",
                 "env_anthropic": bool(os.environ.get("ANTHROPIC_API_KEY")),
                 "env_pixabay": bool(os.environ.get("PIXABAY_API_KEY"))}
 
@@ -501,7 +531,11 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("내 자료만 쓰려면 먼저 한국 영상을 올려주세요")
         want_transcribe = bool(body.get("transcribe"))
         render_after = bool(body.get("render_after"))
-        subs = self._subs(body)
+        to_capcut = body.get("target") == "capcut"
+        subs = self._subs(body, capcut=to_capcut)
+        capcut_folder = self._capcut_folder(body) if render_after and to_capcut else None
+        if render_after and to_capcut and subs.mode == "text" and not project.subtitle_path():
+            raise ValueError("텍스트 자막으로 넣으려면 자막 파일(SRT/VTT)을 먼저 올려주세요")
         quality = body.get("quality", "high")
         shuffle = bool(body.get("shuffle"))
         ai = Claude(settings["anthropic_key"] or None, settings["model"] or None)
@@ -540,14 +574,22 @@ class Handler(BaseHTTPRequestHandler):
             count = len(picked)
             log(f"추천 완료: {count}개 장면을 교체하도록 골랐습니다.")
 
+            if render_after and not count:
+                log("교체할 장면이 없어 영상/초안은 만들지 않았습니다.")
             if render_after and count:
                 segments = normalize([
                     Segment(scenes[int(i)]["s"], scenes[int(i)]["e"], project.path("clips", clip))
                     for i, clip in picked.items()])
-                out_name, render = make_render_work(project, segments, subs, quality, shuffle)
-                project.job["output"] = out_name
-                log("추천대로 영상을 만듭니다...")
-                render(log, part(0.6, 1.0))
+                if to_capcut:
+                    name = os.path.splitext(project.state["source"])[0] + "_한국영상"
+                    log("추천대로 CapCut 초안을 만듭니다...")
+                    make_capcut_work(project, segments, subs, capcut_folder, name, shuffle)(
+                        log, part(0.6, 1.0))
+                else:
+                    out_name, render = make_render_work(project, segments, subs, quality, shuffle)
+                    project.job["output"] = out_name
+                    log("추천대로 영상을 만듭니다...")
+                    render(log, part(0.6, 1.0))
 
         if not project.start_job("auto", work):
             return self.send_error_json("다른 작업이 진행 중입니다", 409)
@@ -593,10 +635,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_error_json("다른 작업이 진행 중입니다", 409)
         self.send_json({"ok": True})
 
-    def _subs(self, body: dict) -> SubtitleOptions:
+    def _subs(self, body: dict, capcut: bool = False) -> SubtitleOptions:
         s = body.get("subs") or {}
         mode = s.get("mode", "key")
-        if mode not in SUBTITLE_MODES:
+        if mode not in (CAPCUT_SUB_MODES if capcut else SUBTITLE_MODES):
+            if mode == "text":
+                raise ValueError("'텍스트 자막' 방식은 CapCut 초안을 만들 때만 쓸 수 있습니다")
             raise ValueError("자막 방식이 올바르지 않습니다")
         region = tuple(float(v) for v in s.get("region", (0, 0.72, 1, 0.28)))
         if len(region) != 4:
@@ -628,8 +672,60 @@ class Handler(BaseHTTPRequestHandler):
         at = float(body.get("at", 0))
         clip = self._clip_path(body.get("clip"))
         out = project.path("preview", "preview.jpg")
-        preview_frame(source, at, clip, out, self._subs(body))
+        subs = self._subs(body, capcut=True)
+        if subs.mode == "text":  # CapCut 텍스트 자막은 CapCut 에서 보이므로 화면만 미리 본다
+            subs.mode = "none"
+        preview_frame(source, at, clip, out, subs)
         self.send_json({"url": project.url("preview", "preview.jpg") + f"?v={time.time():.3f}"})
+
+    def _segments(self, body: dict) -> list[Segment]:
+        project = self.project
+        segments = []
+        for item in body.get("segments", []):
+            start, end = float(item["start"]), float(item["end"])
+            if end - start < 0.04:
+                continue
+            clip = item.get("clip") or None
+            segments.append(Segment(start, end, self._clip_path(clip) if clip else None))
+        segments = normalize(segments)
+        if not segments:
+            raise ValueError("교체할 구간을 하나 이상 골라주세요")
+        if not all(s.clip for s in segments) and not ffmpeg_util.list_media(project.path("clips")):
+            raise ValueError("먼저 한국 영상을 올려주세요")
+        return segments
+
+    def _capcut_folder(self, body: dict) -> str:
+        folder = (body.get("capcut_folder") or self.project.settings().get("capcut_folder")
+                  or default_draft_folder() or "").strip()
+        if not folder:
+            raise ValueError("CapCut 초안 폴더를 찾지 못했습니다. CapCut > 설정 > 초안 위치 의 경로를 "
+                             "AI 설정의 'CapCut 초안 폴더' 에 넣어주세요.")
+        if not os.path.isdir(folder):
+            raise ValueError(f"CapCut 초안 폴더가 없습니다: {folder}")
+        return folder
+
+    def api_capcut(self, body: dict) -> None:
+        project = self.project
+        source = project.source_path()
+        if not source:
+            return self.send_error_json("먼저 원본 영상을 올려주세요")
+        segments = self._segments(body)
+        subs = self._subs(body, capcut=True)
+        if subs.mode == "text" and not project.subtitle_path():
+            raise ValueError("텍스트 자막으로 넣으려면 2단계에서 자막 파일(SRT/VTT)을 먼저 올려주세요")
+        folder = self._capcut_folder(body)
+        name = body.get("draft_name") or os.path.splitext(project.state["source"])[0] + "_한국영상"
+        work = make_capcut_work(project, segments, subs, folder, name, bool(body.get("shuffle")))
+        if not project.start_job("capcut", work):
+            return self.send_error_json("다른 작업이 진행 중입니다", 409)
+        self.send_json({"ok": True})
+
+    def api_open_draft(self, body: dict) -> None:
+        path = self.project.job.get("draft_path")
+        if not path or not os.path.isdir(path):
+            return self.send_error_json("열 초안 폴더가 없습니다")
+        open_folder(path)
+        self.send_json({"ok": True})
 
     def api_render(self, body: dict) -> None:
         project = self.project

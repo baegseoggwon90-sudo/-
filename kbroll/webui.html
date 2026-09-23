@@ -162,6 +162,8 @@
   <input type="password" id="setPixabay" autocomplete="off">
   <label for="setModel">Claude 모델</label>
   <input type="text" id="setModel" placeholder="claude-opus-5">
+  <label for="setCapcut">CapCut 초안 폴더 <span class="muted">— CapCut &gt; 설정 &gt; 초안 위치 의 경로 (비우면 자동으로 찾음)</span></label>
+  <input type="text" id="setCapcut" autocomplete="off">
   <div class="row" style="margin-top:16px; justify-content:flex-end">
     <button id="closeSettings">취소</button>
     <button class="primary" id="saveSettings">저장</button>
@@ -271,6 +273,8 @@
             <span>자막 띠 통째로 가져오기 <small>자막 뒤에 검은/반투명 박스가 있는 경우</small></span></label>
           <label><input type="radio" name="mode" value="none">
             <span>가져오지 않기 <small>화면에 자막이 없는 경우</small></span></label>
+          <label><input type="radio" name="mode" value="text">
+            <span>CapCut 텍스트 자막으로 넣기 <small>CapCut 초안 전용 · 자막 파일(SRT) 필요 · CapCut 에서 글꼴/색 수정 가능</small></span></label>
         </div>
         <div class="field"><span>자막 영역 위쪽</span><input type="range" id="regY" min="0" max="95" value="72"><output id="regYv"></output></div>
         <div class="field"><span>자막 영역 높이</span><input type="range" id="regH" min="5" max="100" value="28"><output id="regHv"></output></div>
@@ -299,8 +303,14 @@
   <section class="step" id="step4">
     <h2><span class="no">4</span>영상 만들기</h2>
     <p class="desc">고른 구간의 화면만 한국 영상으로 바뀌고, 나레이션 음성은 원본 그대로 복사됩니다.</p>
+    <div class="row" style="margin-bottom:10px">
+      <span class="muted">만들 형태</span>
+      <label class="muted"><input type="radio" name="target" value="mp4" checked> MP4 영상 파일</label>
+      <label class="muted"><input type="radio" name="target" value="capcut"> CapCut 초안 <small>(CapCut 에서 열어 계속 편집)</small></label>
+      <span class="muted" id="capcutInfo"></span>
+    </div>
     <div class="row">
-      <label class="muted">화질
+      <label class="muted" id="qualityBox">화질
         <select id="quality">
           <option value="high">고화질 (최종본)</option>
           <option value="normal">보통</option>
@@ -311,6 +321,7 @@
       <span style="flex:1"></span>
       <button class="primary" id="renderBtn">영상 만들기</button>
     </div>
+    <div id="draftBox" class="aibox" hidden style="margin-top:12px"></div>
     <div id="jobBox" hidden>
       <div class="bar"><div id="jobBar"></div></div>
       <div class="muted" id="jobText"></div>
@@ -385,6 +396,7 @@ function restoreSaved() {
     if (s.dark != null) $("dark").value = s.dark;
   }
   if (sv.quality) $("quality").value = sv.quality;
+  if (sv.target) document.querySelector(`input[name=target][value=${sv.target}]`)?.click();
   $("shuffle").checked = !!sv.shuffle;
 }
 
@@ -393,7 +405,7 @@ function saveLater() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => api("/api/save", {
     picked: Object.fromEntries(picked), manual, subs: subsOptions(),
-    quality: $("quality").value, shuffle: $("shuffle").checked,
+    quality: $("quality").value, shuffle: $("shuffle").checked, target: target(),
   }).catch(() => {}), 500);
 }
 
@@ -612,6 +624,7 @@ $("openSettings").onclick = async () => {
   try {
     const st = await api("/api/settings");
     $("setAnthropic").value = st.anthropic_key; $("setPixabay").value = st.pixabay_key; $("setModel").value = st.model;
+    $("setCapcut").value = st.capcut_folder; $("setCapcut").placeholder = st.capcut_detected || "예: C:\\Users\\이름\\AppData\\Local\\CapCut\\User Data\\Projects\\com.lveditor.draft";
     $("setAnthropic").placeholder = st.env_anthropic ? "환경변수 ANTHROPIC_API_KEY 사용 중" : "sk-ant-...";
     $("setPixabay").placeholder = st.env_pixabay ? "환경변수 PIXABAY_API_KEY 사용 중" : "";
   } catch (e) { toast(e.message); }
@@ -621,7 +634,7 @@ $("closeSettings").onclick = () => $("settingsDlg").close();
 $("saveSettings").onclick = async () => {
   try {
     await api("/api/settings", { anthropic_key: $("setAnthropic").value, pixabay_key: $("setPixabay").value,
-                                 model: $("setModel").value });
+                                 model: $("setModel").value, capcut_folder: $("setCapcut").value });
     $("settingsDlg").close(); toast("AI 설정을 저장했습니다."); refresh();
   } catch (e) { toast(e.message); }
 };
@@ -659,7 +672,7 @@ $("autoBtn").onclick = async () => {
     await api("/api/auto", {
       use_library: $("aiLibrary").checked, use_pixabay: $("aiPixabay").checked,
       transcribe: $("aiTranscribe").checked && !$("aiTranscribe").disabled,
-      min_score: Number($("aiScore").value), render_after: $("aiRender").checked,
+      min_score: Number($("aiScore").value), render_after: $("aiRender").checked, target: target(),
       subs: subsOptions(), quality: $("quality").value, shuffle: $("shuffle").checked,
     });
     $("aiLog").hidden = false; $("aiLog").textContent = "시작합니다…";
@@ -709,17 +722,42 @@ $("previewBtn").onclick = async () => {
 };
 
 /* ---------- 4. 만들기 ---------- */
+function target() { return document.querySelector("input[name=target]:checked").value; }
+function renderTarget() {
+  const cc = target() === "capcut";
+  $("qualityBox").hidden = cc;
+  $("renderBtn").textContent = cc ? "CapCut 초안 만들기" : "영상 만들기";
+  const ai = S.ai || {};
+  $("capcutInfo").textContent = !cc ? "" : !ai.capcut ? "⚠ pycapcut 이 설치되어 있지 않습니다 (pip install pycapcut)"
+    : ai.capcut_folder ? "저장 위치: " + ai.capcut_folder : "⚠ AI 설정에서 CapCut 초안 폴더를 지정하세요";
+}
+for (const r of document.querySelectorAll("input[name=target]"))
+  r.addEventListener("change", () => { renderTarget(); saveLater(); });
+
 $("renderBtn").onclick = async () => {
   try {
-    await api("/api/render", { segments: allSegments(), subs: subsOptions(),
-      quality: $("quality").value, shuffle: $("shuffle").checked });
+    const body = { segments: allSegments(), subs: subsOptions(), quality: $("quality").value, shuffle: $("shuffle").checked };
+    await api(target() === "capcut" ? "/api/capcut" : "/api/render", body);
+    $("draftBox").hidden = true;
     startPolling();
   } catch (e) { toast(e.message); }
 };
 
+function renderDraft(job) {
+  const box = $("draftBox");
+  if (job.kind !== "capcut" && !(job.kind === "auto" && job.draft_name)) { box.hidden = true; return; }
+  if (job.status !== "done" || !job.draft_name) { box.hidden = true; return; }
+  box.hidden = false;
+  box.replaceChildren(
+    el("div", {}, el("span", { class: "title" }, "✅ CapCut 초안을 만들었습니다: "), el("b", {}, job.draft_name)),
+    el("div", { class: "muted" }, "CapCut 을 열면 홈 화면 초안 목록에 있습니다. 안 보이면 CapCut 을 완전히 껐다가 다시 켜세요. " +
+      "확인 후 CapCut 에서 내보내기(Export) 하면 됩니다."),
+    el("div", { class: "row" }, el("button", { class: "small", onclick: () => api("/api/open-draft", {}).catch((e) => toast(e.message)) }, "초안 폴더 열기")));
+}
+
 function renderJob(job) {
   const pill = $("jobPill");
-  const label = { scan: "장면 분석", auto: "AI 자동 추천", render: "영상 만들기" }[job.kind] || "작업";
+  const label = { scan: "장면 분석", auto: "AI 자동 추천", render: "영상 만들기", capcut: "CapCut 초안 만들기" }[job.kind] || "작업";
   pill.className = "pill";
   if (job.status === "running") { pill.textContent = `${label} ${Math.round(job.progress * 100)}%`; pill.classList.add("run"); }
   else if (job.status === "error") { pill.textContent = `${label} 실패`; pill.classList.add("err"); }
@@ -734,11 +772,12 @@ function renderJob(job) {
     $("aiLog").scrollTop = $("aiLog").scrollHeight;
   }
   $("renderBtn").disabled = busy || !allSegments().length || !S.source;
-  if ((job.kind === "render" || (job.kind === "auto" && job.output)) && job.status !== "idle") {
+  renderDraft(job);
+  if ((job.kind === "render" || job.kind === "capcut" || (job.kind === "auto" && job.output)) && job.status !== "idle") {
     $("jobBox").hidden = false;
     $("jobBar").style.width = Math.round(job.progress * 100) + "%";
     $("jobText").textContent = busy ? `만드는 중… ${Math.round(job.progress * 100)}% (영상 길이에 따라 몇 분 걸릴 수 있습니다)`
-      : job.status === "done" ? "완료! 아래에서 결과를 확인하고 다운로드하세요." : "";
+      : job.status === "done" ? (job.kind === "capcut" ? "완료!" : "완료! 아래에서 결과를 확인하고 다운로드하세요.") : "";
     $("jobLog").textContent = (job.log || []).join("\n");
     $("jobError").textContent = job.error || "";
   } else if (job.kind === "scan" && job.status === "error") toast(job.error);
@@ -758,7 +797,8 @@ function startPolling() {
         // 서버가 저장한 추천 결과로 선택을 바꾼다
         picked = new Map(Object.entries(S.saved?.picked || {}).map(([k, v]) => [Number(k), v]));
         render();
-        if (job.status === "done") toast(job.output ? "AI 추천대로 영상을 만들었습니다." : "AI 추천이 끝났습니다. 빨간 장면을 확인하세요.");
+        if (job.status === "done") toast(job.output ? "AI 추천대로 영상을 만들었습니다." : job.draft_name ? "AI 추천대로 CapCut 초안을 만들었습니다."
+          : "AI 추천이 끝났습니다. 빨간 장면을 확인하세요.");
         else toast("AI 자동 추천 실패: " + job.error);
       }
     }
@@ -783,7 +823,7 @@ let restored = false;
 function render() {
   if (!restored) { restoreSaved(); restored = true; }   // 처음 열 때만 저장된 선택을 불러온다
   renderUploads(); renderPlayer(); renderScenes(); renderManual(); renderMark();
-  renderTimeline(); renderSubs(); renderPreviewClips(); renderOutputs(); renderSummary(); renderAI();
+  renderTimeline(); renderSubs(); renderPreviewClips(); renderOutputs(); renderSummary(); renderAI(); renderTarget();
   renderJob(S.job || {});
   for (const id of ["step2", "step3", "step4"]) $(id).classList.toggle("locked", !S.source);
 }

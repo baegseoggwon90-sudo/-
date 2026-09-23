@@ -122,6 +122,45 @@ def _num(value: float) -> str:
     return f"{value:.6f}".rstrip("0").rstrip(".")
 
 
+def subtitle_region_px(region: tuple[float, float, float, float], width: int, height: int):
+    """자막 영역(비율)을 짝수 픽셀 좌표 (x, y, w, h) 로 바꾼다."""
+    fx, fy, fw, fh = region
+    x, y = _even(fx * width) if fx > 0 else 0, _even(fy * height) if fy > 0 else 0
+    w = min(_even(fw * width), width - x)
+    h = min(_even(fh * height), height - y)
+    return x, y, w, h
+
+
+def subtitle_chains(src: str, subs: SubtitleOptions, width: int, height: int):
+    """원본 영상(src 라벨)에서 자막 영역만 떼어 내는 필터들.
+
+    key 모드는 글자+테두리만 남기고 나머지를 투명하게(알파) 만든다.
+    반환: (필터 목록, 결과 라벨, (x, y, w, h))
+    """
+    x, y, w, h = subtitle_region_px(subs.region, width, height)
+    chains: list[str] = []
+    crop = f"{src}crop={w}:{h}:{x}:{y}"
+    if subs.mode == "key":
+        dil = ",dilation" * max(0, subs.outline)
+        bright = f"lut=y='if(gte(val,{int(subs.threshold)}),255,0)'"
+        chains.append(f"{crop},format=yuv420p,split=2[sc][sm]")
+        if subs.dark > 0:
+            # 밝은 글자 AND (어두운 테두리 근처) — 글자 획 두께를 덮도록 화면 높이의 1% 만큼 넓힌다
+            reach = ",dilation" * max(2, round(height / 100))
+            chains.append("[sm]format=gray,split=2[sb][sd]")
+            chains.append(f"[sb]{bright}[bright]")
+            chains.append(f"[sd]lut=y='if(lte(val,{int(subs.dark)}),255,0)'{reach}[near]")
+            chains.append(f"[bright][near]blend=all_mode=multiply{dil},"
+                          "boxblur=luma_radius=1:luma_power=1[mask]")
+        else:
+            chains.append(f"[sm]format=gray,{bright}{dil},"
+                          "boxblur=luma_radius=1:luma_power=1[mask]")
+        chains.append("[sc][mask]alphamerge[subs]")
+    else:
+        chains.append(f"{crop}[subs]")
+    return chains, "[subs]", (x, y, w, h)
+
+
 def build_filtergraph(
     width: int,
     height: int,
@@ -153,33 +192,12 @@ def build_filtergraph(
         base = out
 
     if use_subs:
-        fx, fy, fw, fh = subs.region
-        x, y = _even(fx * width) if fx > 0 else 0, _even(fy * height) if fy > 0 else 0
-        w = min(_even(fw * width), width - x)
-        h = min(_even(fh * height), height - y)
-        crop = f"[subsrc]crop={w}:{h}:{x}:{y}"
-        if subs.mode == "key":
-            dil = ",dilation" * max(0, subs.outline)
-            bright = f"lut=y='if(gte(val,{int(subs.threshold)}),255,0)'"
-            chains.append(f"{crop},format=yuv420p,split=2[sc][sm]")
-            if subs.dark > 0:
-                # 밝은 글자 AND (어두운 테두리 근처) — 글자 획 두께를 덮도록 화면 높이의 1% 만큼 넓힌다
-                reach = ",dilation" * max(2, round(height / 100))
-                chains.append("[sm]format=gray,split=2[sb][sd]")
-                chains.append(f"[sb]{bright}[bright]")
-                chains.append(f"[sd]lut=y='if(lte(val,{int(subs.dark)}),255,0)'{reach}[near]")
-                chains.append(f"[bright][near]blend=all_mode=multiply{dil},"
-                              "boxblur=luma_radius=1:luma_power=1[mask]")
-            else:
-                chains.append(f"[sm]format=gray,{bright}{dil},"
-                              "boxblur=luma_radius=1:luma_power=1[mask]")
-            chains.append("[sc][mask]alphamerge[subs]")
-        else:
-            chains.append(f"{crop}[subs]")
+        sub_chains, sub_label, (x, y, _w, _h) = subtitle_chains("[subsrc]", subs, width, height)
+        chains += sub_chains
         enable = "+".join(
             f"between(t,{_num(r.segment.start)},{_num(r.segment.end)})" for r in plan
         )
-        chains.append(f"{base}[subs]overlay={x}:{y}:enable='{enable}'[vsub]")
+        chains.append(f"{base}{sub_label}overlay={x}:{y}:enable='{enable}'[vsub]")
         base = "[vsub]"
 
     chains.append(f"{base}format=yuv420p[vout]")
