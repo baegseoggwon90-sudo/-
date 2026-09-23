@@ -186,6 +186,15 @@ def build_filtergraph(
     return ";\n".join(chains)
 
 
+def _clip_input(rep: Replacement, fps: float) -> list[str]:
+    if rep.info.is_image:
+        return ["-loop", "1", "-framerate", _num(fps), "-i", rep.clip]
+    args = ["-stream_loop", "-1"]
+    if rep.clip_start > 0:
+        args += ["-ss", _num(rep.clip_start)]
+    return args + ["-i", rep.clip]
+
+
 def build_command(
     source: str,
     output: str,
@@ -199,13 +208,7 @@ def build_command(
 ) -> list[str]:
     args: list[str] = ["-y", "-i", source]
     for rep in plan:
-        if rep.info.is_image:
-            args += ["-loop", "1", "-framerate", _num(info.fps), "-i", rep.clip]
-        else:
-            args += ["-stream_loop", "-1"]
-            if rep.clip_start > 0:
-                args += ["-ss", _num(rep.clip_start)]
-            args += ["-i", rep.clip]
+        args += _clip_input(rep, info.fps)
     args += ["-filter_complex_script", graph_file, "-map", "[vout]"]
     if info.has_audio:
         args += ["-map", "0:a", "-c:a", "copy"]
@@ -301,3 +304,25 @@ def _run_with_progress(
             raise FFmpegError(f"ffmpeg 실패 (코드 {code}):\n{err.read()[-3000:]}")
     if progress:
         progress(1.0)
+
+
+def preview_frame(
+    source: str,
+    at: float,
+    clip: str,
+    out_image: str,
+    subs: SubtitleOptions | None = None,
+    clip_start: float = 0.0,
+) -> str:
+    """원본 at 초 지점을 clip 으로 교체했을 때의 화면 한 장을 이미지로 저장한다 (자막 설정 확인용)."""
+    subs = subs or SubtitleOptions()
+    info = ffmpeg_util.probe(source)
+    plan = [Replacement(Segment(0.0, 1.0), clip, clip_start, ffmpeg_util.probe(clip))]
+    graph = build_filtergraph(info.width, info.height, info.fps, plan, subs)
+    args = ["-y", "-ss", _num(max(0.0, at)), "-t", "1", "-i", source,
+            *_clip_input(plan[0], info.fps),
+            "-filter_complex", graph, "-map", "[vout]", "-frames:v", "1", out_image]
+    proc = ffmpeg_util.run(args)
+    if proc.returncode != 0 or not os.path.exists(out_image):
+        raise FFmpegError(f"미리보기 실패:\n{(proc.stderr or '')[-2000:]}")
+    return out_image

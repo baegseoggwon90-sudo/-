@@ -2,7 +2,7 @@
 
     python -m kbroll scan 원본.mp4 --clips 한국영상폴더
     python -m kbroll replace 원본.mp4 segments.csv --clips 한국영상폴더 -o 결과.mp4
-    python -m kbroll gui
+    python -m kbroll web      (기본: 브라우저 화면)
 """
 
 from __future__ import annotations
@@ -74,6 +74,15 @@ def cmd_replace(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    from .web import serve
+
+    workdir = getattr(args, "workdir", None) or os.path.join(os.path.expanduser("~"), "kbroll_작업")
+    serve(workdir, host=getattr(args, "host", "127.0.0.1"), port=getattr(args, "port", 8765),
+          open_browser=getattr(args, "open", True))
+    return 0
+
+
 def cmd_gui(_args: argparse.Namespace) -> int:
     from .gui import main as gui_main
 
@@ -119,6 +128,14 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--preset", default="medium", help="인코딩 속도 (ultrafast~veryslow)")
     r.set_defaults(func=cmd_replace)
 
+    w = sub.add_parser("web", help="브라우저에서 쓰는 편집 화면 실행 (기본)")
+    w.add_argument("--workdir", help="작업 폴더 (기본: 홈폴더/kbroll_작업)")
+    w.add_argument("--port", type=int, default=8765, help="포트 번호 (기본 8765)")
+    w.add_argument("--host", default="127.0.0.1",
+                   help="접속 허용 주소. 같은 공유기의 다른 기기에서 쓰려면 0.0.0.0")
+    w.add_argument("--no-open", dest="open", action="store_false", help="브라우저 자동으로 열지 않기")
+    w.set_defaults(func=cmd_web)
+
     g = sub.add_parser("gui", help="간단한 창 프로그램 실행")
     g.set_defaults(func=cmd_gui)
     return p
@@ -127,8 +144,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if not getattr(args, "func", None):  # 명령 없이 실행하면 창 프로그램
-        return cmd_gui(args)
+    if not getattr(args, "func", None):  # 명령 없이 실행하면 웹 화면
+        args.func = cmd_web
     try:
         return args.func(args)
     except (FFmpegError, ValueError, OSError) as exc:

@@ -1,0 +1,639 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>한국 영상 교체기</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🎬%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg:#f4f5f7; --card:#ffffff; --text:#1c2230; --muted:#687080; --line:#dde1e8;
+    --soft:#eef1f5; --accent:#2f5bea; --accent-text:#ffffff; --pick:#d93a32; --pick-bg:#fdeceb;
+    --ok:#1d8a4c; --warn:#b26b00; --region:#ffcc00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#121418; --card:#1c1f25; --text:#e7e9ee; --muted:#9aa1ad; --line:#2f333b;
+      --soft:#252930; --accent:#6d93ff; --accent-text:#0d1220; --pick:#ff6159; --pick-bg:#3a1f1e;
+      --ok:#4cc585; --warn:#f0a640; --region:#ffd84d;
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-size:15px; line-height:1.5;
+         font-family:system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif; }
+  header { position:sticky; top:0; z-index:20; background:var(--card); border-bottom:1px solid var(--line);
+           padding:10px 20px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  header h1 { margin:0; font-size:17px; flex:1 1 auto; }
+  .pill { font-size:13px; padding:3px 10px; border-radius:99px; background:var(--soft); color:var(--muted); }
+  .pill.run { color:var(--accent); } .pill.err { color:var(--pick); } .pill.ok { color:var(--ok); }
+  main { max-width:1400px; margin:0 auto; padding:20px; display:flex; flex-direction:column; gap:20px; }
+  section.step { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px 20px; }
+  .step > h2 { margin:0 0 4px; font-size:16px; display:flex; align-items:center; gap:10px; }
+  .step > h2 .no { display:inline-grid; place-items:center; width:24px; height:24px; border-radius:50%;
+                   background:var(--accent); color:var(--accent-text); font-size:13px; }
+  .step > p.desc { margin:0 0 14px; color:var(--muted); font-size:14px; }
+  .step.locked { opacity:.55; }
+  button, select, input[type=number] { font:inherit; color:var(--text); background:var(--card);
+           border:1px solid var(--line); border-radius:8px; padding:7px 12px; }
+  button { cursor:pointer; }
+  button:hover:not(:disabled) { border-color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-text); font-weight:600; }
+  button.small { padding:3px 9px; font-size:13px; }
+  button.link { border:none; background:none; color:var(--muted); padding:2px 4px; }
+  button.link:hover { color:var(--pick); }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .muted { color:var(--muted); font-size:13px; }
+  .grid2 { display:grid; grid-template-columns:minmax(0,1fr); gap:16px; }
+  @media (min-width:900px) { .grid2 { grid-template-columns:minmax(0,1fr) minmax(0,1fr); } }
+
+  /* 올리기 */
+  .drop { display:block; border:2px dashed var(--line); border-radius:10px; padding:18px; text-align:center; cursor:pointer;
+          background:var(--soft); transition:border-color .15s; }
+  .drop.over { border-color:var(--accent); }
+  .drop b { display:block; margin-bottom:2px; }
+  .drop input { display:none; }
+  .fileinfo { margin-top:10px; font-size:14px; }
+  .uploads { margin-top:8px; display:flex; flex-direction:column; gap:4px; }
+  .uploads .up { font-size:13px; display:flex; gap:8px; align-items:center; }
+  .uploads progress { flex:1; height:8px; }
+  .clips { display:grid; grid-template-columns:repeat(auto-fill, minmax(130px,1fr)); gap:8px; margin-top:10px; }
+  .clip { border:1px solid var(--line); border-radius:8px; overflow:hidden; font-size:12px; background:var(--card); }
+  .clip .media { aspect-ratio:16/9; background:#000; display:block; width:100%; object-fit:cover; }
+  .clip .cap { display:flex; justify-content:space-between; align-items:center; padding:3px 6px; gap:4px; }
+  .clip .cap span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  /* 장면 선택 */
+  .editor { display:grid; grid-template-columns:minmax(0,1fr); gap:18px; }
+  @media (min-width:1000px) { .editor { grid-template-columns:minmax(360px, 460px) minmax(0,1fr); }
+                              .side { position:sticky; top:64px; align-self:start; } }
+  .screen { position:relative; width:100%; background:#000; border-radius:8px; overflow:hidden; aspect-ratio:16/9; }
+  .screen video { position:absolute; inset:0; width:100%; height:100%; }
+  .region { position:absolute; border:2px dashed var(--region); pointer-events:none; display:none;
+            box-shadow:0 0 0 9999px rgba(0,0,0,.25); }
+  .region span { position:absolute; left:4px; top:-22px; font-size:11px; background:var(--region); color:#000;
+                 padding:0 5px; border-radius:4px; }
+  .screen.show-region .region { display:block; }
+  .timeline { position:relative; height:26px; margin-top:8px; background:var(--soft); border-radius:6px;
+              cursor:pointer; overflow:hidden; }
+  .timeline .seg { position:absolute; top:0; bottom:0; background:var(--pick); opacity:.8; }
+  .timeline .cut { position:absolute; top:0; bottom:0; width:1px; background:var(--line); }
+  .timeline .head { position:absolute; top:0; bottom:0; width:2px; background:var(--text); }
+  .tools { margin-top:10px; display:flex; flex-direction:column; gap:8px; }
+  .manual-list { display:flex; flex-direction:column; gap:4px; font-size:13px; }
+  .manual-list .item { display:flex; gap:8px; align-items:center; background:var(--soft); border-radius:6px; padding:3px 8px; }
+  .manual-list .item span { flex:1; }
+  .scenes { display:grid; grid-template-columns:repeat(auto-fill, minmax(170px,1fr)); gap:10px; align-content:start; }
+  .scene { border:2px solid var(--line); border-radius:10px; overflow:hidden; cursor:pointer; user-select:none;
+           background:var(--card); }
+  .scene img { width:100%; aspect-ratio:16/9; object-fit:cover; display:block; background:#000; }
+  .scene .meta { display:flex; justify-content:space-between; padding:5px 8px; font-size:12px; }
+  .scene .meta span:last-child { color:var(--muted); }
+  .scene select { display:none; width:calc(100% - 12px); margin:0 6px 6px; font-size:12px; padding:3px 6px; }
+  .scene.picked { border-color:var(--pick); background:var(--pick-bg); }
+  .scene.picked select { display:block; }
+  .scene.picked .meta span:first-child::before { content:"교체 · "; color:var(--pick); font-weight:700; }
+  .scene.current { outline:3px solid var(--accent); outline-offset:1px; }
+  .empty { color:var(--muted); padding:30px; text-align:center; border:1px dashed var(--line); border-radius:10px; }
+
+  /* 자막 */
+  .field { display:grid; grid-template-columns:130px minmax(0,1fr) 52px; gap:10px; align-items:center; font-size:14px; }
+  .field input[type=range] { width:100%; }
+  .field output { text-align:right; font-variant-numeric:tabular-nums; color:var(--muted); }
+  .modes { display:flex; flex-direction:column; gap:6px; margin-bottom:12px; }
+  .modes label { display:flex; gap:8px; align-items:flex-start; font-size:14px; cursor:pointer; }
+  .modes small { color:var(--muted); display:block; }
+  .preview-box img { width:100%; border-radius:8px; display:block; background:#000; }
+  .preview-box .empty { padding:40px 20px; }
+
+  /* 만들기 */
+  .bar { height:10px; background:var(--soft); border-radius:6px; overflow:hidden; margin:10px 0 6px; }
+  .bar div { height:100%; width:0; background:var(--accent); transition:width .3s; }
+  .log { font-family:ui-monospace, Menlo, Consolas, monospace; font-size:12px; background:var(--soft);
+         border-radius:8px; padding:8px 10px; max-height:160px; overflow:auto; white-space:pre-wrap; margin:0; }
+  .error { color:var(--pick); white-space:pre-wrap; font-size:13px; }
+  .outputs { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px,1fr)); gap:14px; margin-top:14px; }
+  .output { border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .output video { width:100%; display:block; background:#000; aspect-ratio:16/9; }
+  .output .cap { padding:8px 10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:13px; }
+  .output .cap b { flex:1 1 100%; font-weight:600; word-break:break-all; }
+  a.btn { text-decoration:none; font-size:13px; padding:4px 10px; border-radius:8px; background:var(--accent);
+          color:var(--accent-text); font-weight:600; }
+  .toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:var(--text); color:var(--bg);
+           padding:10px 16px; border-radius:10px; font-size:14px; opacity:0; pointer-events:none; transition:opacity .2s; z-index:50;
+           max-width:90vw; }
+  .toast.show { opacity:.95; }
+  @media (max-width:600px) { main { padding:12px; } section.step { padding:14px; }
+    .field { grid-template-columns:100px minmax(0,1fr) 44px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎬 한국 영상 교체기</h1>
+  <span class="pill" id="jobPill">대기 중</span>
+</header>
+
+<main>
+  <!-- 1. 올리기 -->
+  <section class="step" id="step1">
+    <h2><span class="no">1</span>영상 올리기</h2>
+    <p class="desc">편집할 원본 영상과, 외국 영상 대신 넣을 한국 영상(또는 사진)을 올려주세요. 파일은 이 PC 의 작업 폴더에만 저장됩니다.</p>
+    <div class="grid2">
+      <div>
+        <label class="drop" id="dropSource">
+          <b>원본 영상</b><span class="muted">여기로 끌어다 놓거나 클릭해서 선택</span>
+          <input type="file" id="fileSource" accept="video/*,.mkv">
+        </label>
+        <div class="uploads" id="upSource"></div>
+        <div class="fileinfo" id="sourceInfo"></div>
+      </div>
+      <div>
+        <label class="drop" id="dropClips">
+          <b>한국 영상 / 사진</b><span class="muted">여러 개를 한 번에 올릴 수 있습니다</span>
+          <input type="file" id="fileClips" accept="video/*,image/*,.mkv" multiple>
+        </label>
+        <div class="uploads" id="upClips"></div>
+        <div class="clips" id="clipList"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. 장면 고르기 -->
+  <section class="step" id="step2">
+    <h2><span class="no">2</span>외국 영상 장면 고르기</h2>
+    <p class="desc">장면 분석을 누르면 컷 단위로 나뉩니다. 외국 영상이 나오는 장면을 <b>클릭</b>해서 빨간색으로 표시하세요.
+      <b>Shift+클릭</b>은 범위 선택입니다. 장면 구분이 안 맞으면 플레이어 아래에서 구간을 직접 추가할 수 있습니다.</p>
+    <div class="row" style="margin-bottom:14px">
+      <button class="primary" id="scanBtn">장면 분석</button>
+      <label class="muted">나누는 정도
+        <select id="threshold">
+          <option value="0.2">잘게</option>
+          <option value="0.3" selected>보통</option>
+          <option value="0.4">크게</option>
+        </select>
+      </label>
+      <span class="muted" id="pickSummary"></span>
+      <span style="flex:1"></span>
+      <button class="small" id="clearPicks">선택 모두 해제</button>
+    </div>
+    <div class="editor">
+      <div class="side">
+        <div class="screen" id="screen">
+          <video id="player" controls preload="metadata" playsinline></video>
+          <div class="region" id="regionBox"><span>자막 영역</span></div>
+        </div>
+        <div class="timeline" id="timeline" title="클릭하면 그 위치로 이동"></div>
+        <div class="tools">
+          <div class="row">
+            <button class="small" id="markStart">시작 ⟵ 현재 위치</button>
+            <button class="small" id="markEnd">끝 ⟵ 현재 위치</button>
+            <span class="muted" id="markLabel">직접 구간: -</span>
+            <button class="small" id="addManual" disabled>구간 추가</button>
+          </div>
+          <div class="manual-list" id="manualList"></div>
+        </div>
+      </div>
+      <div class="scenes" id="scenes"><div class="empty">원본 영상을 올리고 <b>장면 분석</b>을 눌러주세요.</div></div>
+    </div>
+  </section>
+
+  <!-- 3. 자막 -->
+  <section class="step" id="step3">
+    <h2><span class="no">3</span>자막 지키기</h2>
+    <p class="desc">바뀐 화면 위에 원본 자막을 다시 얹는 방법입니다. 플레이어를 자막이 나오는 장면에 두고 <b>미리보기</b>로 확인하세요.</p>
+    <div class="grid2">
+      <div>
+        <div class="modes" id="modes">
+          <label><input type="radio" name="mode" value="key" checked>
+            <span>글자만 가져오기 <small>흰색·노란색 글자 + 검은 테두리 자막 (대부분의 유튜브 자막)</small></span></label>
+          <label><input type="radio" name="mode" value="band">
+            <span>자막 띠 통째로 가져오기 <small>자막 뒤에 검은/반투명 박스가 있는 경우</small></span></label>
+          <label><input type="radio" name="mode" value="none">
+            <span>가져오지 않기 <small>화면에 자막이 없는 경우</small></span></label>
+        </div>
+        <div class="field"><span>자막 영역 위쪽</span><input type="range" id="regY" min="0" max="95" value="72"><output id="regYv"></output></div>
+        <div class="field"><span>자막 영역 높이</span><input type="range" id="regH" min="5" max="100" value="28"><output id="regHv"></output></div>
+        <div id="keyOpts">
+          <div class="field"><span>글자 밝기 기준</span><input type="range" id="thr" min="120" max="250" value="200"><output id="thrv"></output></div>
+          <div class="field"><span>테두리 두께</span><input type="range" id="outl" min="0" max="12" value="4"><output id="outlv"></output></div>
+          <div class="field"><span>테두리 어두움</span><input type="range" id="dark" min="0" max="140" value="80"><output id="darkv"></output></div>
+          <p class="muted">노란 글자가 빠지면 <i>글자 밝기 기준</i>을 낮추고, 글자 주변 배경이 딸려 오면 <i>테두리 두께</i>를 줄이세요.
+            테두리 없는 자막이면 <i>테두리 어두움</i>을 0 으로.</p>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label class="muted"><input type="checkbox" id="showRegion" checked> 플레이어에 자막 영역 표시</label>
+        </div>
+      </div>
+      <div class="preview-box">
+        <div class="row" style="margin-bottom:8px">
+          <button class="primary" id="previewBtn">현재 위치 미리보기</button>
+          <select id="previewClip"></select>
+        </div>
+        <div id="previewOut"><div class="empty">플레이어를 자막이 나오는 곳으로 옮긴 뒤 미리보기를 누르세요.</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4. 만들기 -->
+  <section class="step" id="step4">
+    <h2><span class="no">4</span>영상 만들기</h2>
+    <p class="desc">고른 구간의 화면만 한국 영상으로 바뀌고, 나레이션 음성은 원본 그대로 복사됩니다.</p>
+    <div class="row">
+      <label class="muted">화질
+        <select id="quality">
+          <option value="high">고화질 (최종본)</option>
+          <option value="normal">보통</option>
+          <option value="draft">빠른 확인용</option>
+        </select>
+      </label>
+      <label class="muted"><input type="checkbox" id="shuffle"> 한국 영상 무작위 순서</label>
+      <span style="flex:1"></span>
+      <button class="primary" id="renderBtn">영상 만들기</button>
+    </div>
+    <div id="jobBox" hidden>
+      <div class="bar"><div id="jobBar"></div></div>
+      <div class="muted" id="jobText"></div>
+      <pre class="log" id="jobLog"></pre>
+      <div class="error" id="jobError"></div>
+    </div>
+    <div class="outputs" id="outputs"></div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const el = (tag, props = {}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "class") n.className = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else if (k in n) n[k] = v;
+    else n.setAttribute(k, v);
+  }
+  for (const k of kids) if (k != null) n.append(k);
+  return n;
+};
+
+let S = { source: null, clips: [], scenes: [], outputs: [], job: {} };
+let picked = new Map();      // 장면 번호 -> 한국 영상 이름 ('' = 자동)
+let manual = [];             // {s, e, clip}
+let lastClick = null;
+let mark = { s: null, e: null };
+let polling = null;
+
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove("show"), 3500);
+}
+function fmt(t, digits = 1) {
+  if (t == null || isNaN(t)) return "-";
+  const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = t % 60;
+  const ss = s.toFixed(digits).padStart(digits ? 3 + digits : 2, "0");
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + ss;
+}
+function fmtSize(b) { return b > 1e9 ? (b / 1e9).toFixed(2) + " GB" : (b / 1e6).toFixed(1) + " MB"; }
+
+async function api(path, body) {
+  const res = await fetch(path, body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ("요청 실패 " + res.status));
+  return data;
+}
+
+/* ---------- 상태 ---------- */
+async function refresh() {
+  S = await api("/api/state");
+  render();
+  if (S.job && S.job.status === "running") startPolling();
+}
+
+function restoreSaved() {
+  const sv = S.saved || {};
+  picked = new Map(Object.entries(sv.picked || {}).map(([k, v]) => [Number(k), v])
+    .filter(([k]) => k < S.scenes.length));
+  manual = Array.isArray(sv.manual) ? sv.manual : [];
+  if (sv.subs) {
+    const s = sv.subs;
+    document.querySelector(`input[name=mode][value=${s.mode}]`)?.click();
+    if (s.region) { $("regY").value = Math.round(s.region[1] * 100); $("regH").value = Math.round(s.region[3] * 100); }
+    if (s.threshold != null) $("thr").value = s.threshold;
+    if (s.outline != null) $("outl").value = s.outline;
+    if (s.dark != null) $("dark").value = s.dark;
+  }
+  if (sv.quality) $("quality").value = sv.quality;
+  $("shuffle").checked = !!sv.shuffle;
+}
+
+let saveTimer = null;
+function saveLater() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => api("/api/save", {
+    picked: Object.fromEntries(picked), manual, subs: subsOptions(),
+    quality: $("quality").value, shuffle: $("shuffle").checked,
+  }).catch(() => {}), 500);
+}
+
+/* ---------- 1. 올리기 ---------- */
+function upload(file, kind, list) {
+  return new Promise((resolve) => {
+    const bar = el("progress", { max: 100, value: 0 });
+    const row = el("div", { class: "up" }, el("span", {}, file.name), bar);
+    list.append(row);
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", `/api/upload?kind=${kind}&name=${encodeURIComponent(file.name)}`);
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) bar.value = e.loaded / e.total * 100; };
+    xhr.onload = () => {
+      row.remove();
+      let data = {}; try { data = JSON.parse(xhr.responseText); } catch (e) {}
+      if (xhr.status >= 400) toast(`${file.name}: ${data.error || "업로드 실패"}`);
+      resolve(xhr.status < 400);
+    };
+    xhr.onerror = () => { row.remove(); toast(`${file.name}: 업로드 실패`); resolve(false); };
+    xhr.send(file);
+  });
+}
+
+async function uploadSource(files) {
+  if (!files.length) return;
+  if (S.source && !confirm("원본 영상을 바꾸면 고른 장면이 초기화됩니다. 계속할까요?")) return;
+  if (await upload(files[0], "source", $("upSource"))) {
+    picked.clear(); manual = [];
+    await refresh();
+    toast("원본 영상을 올렸습니다. 이제 장면 분석을 눌러주세요.");
+  }
+}
+async function uploadClips(files) {
+  for (const f of files) await upload(f, "clip", $("upClips"));
+  await refresh();
+}
+
+function setupDrop(zone, input, handler) {
+  input.addEventListener("change", () => { handler([...input.files]); input.value = ""; });
+  zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("over"); });
+  zone.addEventListener("dragleave", () => zone.classList.remove("over"));
+  zone.addEventListener("drop", (e) => { e.preventDefault(); zone.classList.remove("over"); handler([...e.dataTransfer.files]); });
+}
+setupDrop($("dropSource"), $("fileSource"), uploadSource);
+setupDrop($("dropClips"), $("fileClips"), uploadClips);
+
+function renderUploads() {
+  const src = S.source;
+  $("sourceInfo").replaceChildren(src
+    ? el("div", {}, el("b", {}, src.name), el("br"),
+        el("span", { class: "muted" }, `${src.width}×${src.height} · ${Math.round(src.fps * 100) / 100}fps · ${fmt(src.duration)}`
+          + (src.has_audio ? " · 음성 있음" : " · 음성 없음")))
+    : el("span", { class: "muted" }, "아직 올린 원본 영상이 없습니다."));
+
+  $("clipList").replaceChildren(...S.clips.map((c) => el("div", { class: "clip" },
+    c.is_image ? el("img", { class: "media", src: c.url, alt: c.name, loading: "lazy" })
+               : el("video", { class: "media", src: c.url + "#t=1", muted: true, preload: "metadata" }),
+    el("div", { class: "cap" },
+      el("span", { title: c.name }, c.name),
+      el("span", { class: "muted" }, c.is_image ? "사진" : fmt(c.duration, 0)),
+      el("button", { class: "link", title: "삭제", onclick: async () => {
+        if (!confirm(`${c.name} 을(를) 삭제할까요?`)) return;
+        await api("/api/delete", { kind: "clip", name: c.name }); refresh(); } }, "✕")))));
+  if (!S.clips.length) $("clipList").append(el("span", { class: "muted" }, "아직 올린 한국 영상이 없습니다."));
+}
+
+/* ---------- 2. 장면 ---------- */
+const player = $("player");
+let playerSrc = null;
+
+function renderPlayer() {
+  const src = S.source;
+  if (!src) { player.removeAttribute("src"); playerSrc = null; return; }
+  if (playerSrc !== src.url) { player.src = src.url; playerSrc = src.url; }
+  $("screen").style.aspectRatio = `${src.width} / ${src.height}`;
+}
+
+function clipSelect(value, onchange) {
+  const sel = el("select", { onclick: (e) => e.stopPropagation(), onchange: () => onchange(sel.value) },
+    el("option", { value: "" }, "한국 영상: 자동"),
+    ...S.clips.map((c) => el("option", { value: c.name }, c.name)));
+  sel.value = S.clips.some((c) => c.name === value) ? value : "";
+  return sel;
+}
+
+function renderScenes() {
+  const box = $("scenes");
+  if (!S.scenes.length) {
+    box.replaceChildren(el("div", { class: "empty" }, S.source
+      ? "장면 분석을 눌러 장면 목록을 만드세요." : "원본 영상을 올리고 장면 분석을 눌러주세요."));
+    return;
+  }
+  box.replaceChildren(...S.scenes.map((sc, i) => {
+    const card = el("div", { class: "scene" + (picked.has(i) ? " picked" : ""), onclick: (e) => clickScene(i, e.shiftKey) },
+      el("img", { src: sc.thumb, alt: fmt(sc.s), loading: "lazy" }),
+      el("div", { class: "meta" }, el("span", {}, fmt(sc.s)), el("span", {}, (sc.e - sc.s).toFixed(1) + "초")),
+      clipSelect(picked.get(i) || "", (v) => { picked.set(i, v); saveLater(); }));
+    card.dataset.i = i;
+    return card;
+  }));
+}
+
+function setPicked(i, on) {
+  const card = $("scenes").children[i];
+  if (on) { if (!picked.has(i)) picked.set(i, card.querySelector("select").value); }
+  else picked.delete(i);
+  card.classList.toggle("picked", on);
+}
+
+function clickScene(i, range) {
+  if (range && lastClick !== null) {
+    const [a, b] = lastClick < i ? [lastClick, i] : [i, lastClick];
+    for (let k = a; k <= b; k++) setPicked(k, true);
+  } else setPicked(i, !picked.has(i));
+  lastClick = i;
+  try { player.currentTime = S.scenes[i].s + 0.05; } catch (e) {}
+  afterPickChange();
+}
+
+function afterPickChange() { renderTimeline(); renderSummary(); saveLater(); }
+
+function allSegments() {
+  const segs = [...picked.entries()].map(([i, clip]) => ({ start: S.scenes[i].s, end: S.scenes[i].e, clip }));
+  for (const m of manual) segs.push({ start: m.s, end: m.e, clip: m.clip || "" });
+  return segs.sort((a, b) => a.start - b.start);
+}
+
+function renderSummary() {
+  const segs = allSegments();
+  const total = segs.reduce((a, s) => a + (s.end - s.start), 0);
+  $("pickSummary").textContent = segs.length ? `교체 ${segs.length}곳 · 총 ${total.toFixed(1)}초` : "";
+  $("renderBtn").disabled = !segs.length || !S.source;
+}
+
+function renderTimeline() {
+  const tl = $("timeline"), d = S.source?.duration;
+  tl.replaceChildren();
+  if (!d) return;
+  for (const sc of S.scenes.slice(1)) tl.append(el("div", { class: "cut", style: `left:${sc.s / d * 100}%` }));
+  for (const s of allSegments())
+    tl.append(el("div", { class: "seg", style: `left:${s.start / d * 100}%;width:${Math.max(0.2, (s.end - s.start) / d * 100)}%` }));
+  tl.append(el("div", { class: "head", id: "playhead", style: `left:${player.currentTime / d * 100}%` }));
+}
+$("timeline").addEventListener("click", (e) => {
+  const d = S.source?.duration; if (!d) return;
+  const r = e.currentTarget.getBoundingClientRect();
+  player.currentTime = (e.clientX - r.left) / r.width * d;
+});
+player.addEventListener("timeupdate", () => {
+  const d = S.source?.duration, head = $("playhead");
+  if (d && head) head.style.left = (player.currentTime / d * 100) + "%";
+  const cur = S.scenes.findIndex((sc) => player.currentTime >= sc.s && player.currentTime < sc.e);
+  document.querySelectorAll(".scene.current").forEach((n) => n.classList.remove("current"));
+  if (cur >= 0) $("scenes").children[cur]?.classList.add("current");
+});
+
+$("clearPicks").onclick = () => {
+  if (!picked.size && !manual.length) return;
+  if (!confirm("고른 장면과 직접 추가한 구간을 모두 해제할까요?")) return;
+  for (const i of [...picked.keys()]) setPicked(i, false);
+  manual = []; renderManual(); afterPickChange();
+};
+
+function renderMark() {
+  $("markLabel").textContent = `직접 구간: ${fmt(mark.s)} ~ ${fmt(mark.e)}`;
+  $("addManual").disabled = !(mark.s != null && mark.e != null && mark.e > mark.s);
+}
+$("markStart").onclick = () => { mark.s = player.currentTime; renderMark(); };
+$("markEnd").onclick = () => { mark.e = player.currentTime; renderMark(); };
+$("addManual").onclick = () => {
+  manual.push({ s: +mark.s.toFixed(3), e: +mark.e.toFixed(3), clip: "" });
+  mark = { s: null, e: null }; renderMark(); renderManual(); afterPickChange();
+};
+function renderManual() {
+  $("manualList").replaceChildren(...manual.map((m, k) => el("div", { class: "item" },
+    el("span", {}, `직접 구간 ${fmt(m.s)} ~ ${fmt(m.e)}`),
+    clipSelect(m.clip, (v) => { m.clip = v; saveLater(); }),
+    el("button", { class: "link", title: "삭제", onclick: () => { manual.splice(k, 1); renderManual(); afterPickChange(); } }, "✕"))));
+}
+
+$("scanBtn").onclick = async () => {
+  if (picked.size && !confirm("다시 분석하면 고른 장면이 초기화됩니다. 계속할까요?")) return;
+  try {
+    await api("/api/scan", { threshold: Number($("threshold").value) });
+    picked.clear(); S.scenes = []; saveLater();
+    renderScenes(); afterPickChange();
+    $("scenes").replaceChildren(el("div", { class: "empty" }, "장면을 분석하고 있습니다…"));
+    startPolling();
+  } catch (e) { toast(e.message); }
+};
+
+/* ---------- 3. 자막 ---------- */
+function subsOptions() {
+  const mode = document.querySelector("input[name=mode]:checked").value;
+  const y = Number($("regY").value) / 100, h = Math.min(Number($("regH").value) / 100, 1 - y);
+  return { mode, region: [0, y, 1, +h.toFixed(3)], threshold: Number($("thr").value),
+           outline: Number($("outl").value), dark: Number($("dark").value) };
+}
+function renderSubs() {
+  const o = subsOptions();
+  $("regYv").textContent = Math.round(o.region[1] * 100) + "%";
+  $("regHv").textContent = Math.round(o.region[3] * 100) + "%";
+  $("thrv").textContent = o.threshold; $("outlv").textContent = o.outline + "px"; $("darkv").textContent = o.dark;
+  $("keyOpts").hidden = o.mode !== "key";
+  const box = $("regionBox");
+  box.style.left = "0"; box.style.width = "100%";
+  box.style.top = o.region[1] * 100 + "%"; box.style.height = o.region[3] * 100 + "%";
+  $("screen").classList.toggle("show-region", $("showRegion").checked && o.mode !== "none");
+}
+for (const id of ["regY", "regH", "thr", "outl", "dark", "showRegion"])
+  $(id).addEventListener("input", () => { renderSubs(); saveLater(); });
+for (const r of document.querySelectorAll("input[name=mode]"))
+  r.addEventListener("change", () => { renderSubs(); saveLater(); });
+$("quality").onchange = saveLater; $("shuffle").onchange = saveLater;
+
+function renderPreviewClips() {
+  const sel = $("previewClip"), cur = sel.value;
+  sel.replaceChildren(...S.clips.map((c) => el("option", { value: c.name }, c.name)));
+  if (S.clips.some((c) => c.name === cur)) sel.value = cur;
+}
+$("previewBtn").onclick = async () => {
+  if (!S.source) return toast("먼저 원본 영상을 올려주세요.");
+  if (!S.clips.length) return toast("먼저 한국 영상을 올려주세요.");
+  const btn = $("previewBtn"); btn.disabled = true; btn.textContent = "만드는 중…";
+  try {
+    const r = await api("/api/preview", { at: player.currentTime || 0, clip: $("previewClip").value, subs: subsOptions() });
+    $("previewOut").replaceChildren(el("img", { src: r.url, alt: "미리보기" }),
+      el("p", { class: "muted" }, `${fmt(player.currentTime)} 지점을 교체했을 때의 화면입니다.`));
+  } catch (e) { toast(e.message); }
+  btn.disabled = false; btn.textContent = "현재 위치 미리보기";
+};
+
+/* ---------- 4. 만들기 ---------- */
+$("renderBtn").onclick = async () => {
+  try {
+    await api("/api/render", { segments: allSegments(), subs: subsOptions(),
+      quality: $("quality").value, shuffle: $("shuffle").checked });
+    startPolling();
+  } catch (e) { toast(e.message); }
+};
+
+function renderJob(job) {
+  const pill = $("jobPill");
+  const label = job.kind === "scan" ? "장면 분석" : "영상 만들기";
+  pill.className = "pill";
+  if (job.status === "running") { pill.textContent = `${label} ${Math.round(job.progress * 100)}%`; pill.classList.add("run"); }
+  else if (job.status === "error") { pill.textContent = `${label} 실패`; pill.classList.add("err"); }
+  else if (job.status === "done") { pill.textContent = `${label} 완료`; pill.classList.add("ok"); }
+  else pill.textContent = "대기 중";
+  const busy = job.status === "running";
+  $("scanBtn").disabled = busy || !S.source;
+  $("renderBtn").disabled = busy || !allSegments().length || !S.source;
+  if (job.kind === "render" && job.status !== "idle") {
+    $("jobBox").hidden = false;
+    $("jobBar").style.width = Math.round(job.progress * 100) + "%";
+    $("jobText").textContent = busy ? `만드는 중… ${Math.round(job.progress * 100)}% (영상 길이에 따라 몇 분 걸릴 수 있습니다)`
+      : job.status === "done" ? "완료! 아래에서 결과를 확인하고 다운로드하세요." : "";
+    $("jobLog").textContent = (job.log || []).join("\n");
+    $("jobError").textContent = job.error || "";
+  } else if (job.kind === "scan" && job.status === "error") toast(job.error);
+}
+
+function startPolling() {
+  if (polling) return;
+  polling = setInterval(async () => {
+    const job = await api("/api/job").catch(() => null);
+    if (!job) return;
+    renderJob(job);
+    if (job.status !== "running") {
+      clearInterval(polling); polling = null;
+      await refresh();
+      if (job.status === "done" && job.kind === "scan") toast(`장면 ${S.scenes.length}개로 나눴습니다. 외국 영상 장면을 클릭하세요.`);
+    }
+  }, 700);
+}
+
+function renderOutputs() {
+  $("outputs").replaceChildren(...S.outputs.map((o) => el("div", { class: "output" },
+    el("video", { src: o.url, controls: true, preload: "metadata" }),
+    el("div", { class: "cap" },
+      el("b", {}, o.name),
+      el("span", { class: "muted" }, fmtSize(o.size)),
+      el("span", { style: "flex:1" }),
+      el("a", { class: "btn", href: o.url + "?download=1" }, "다운로드"),
+      el("button", { class: "link", title: "삭제", onclick: async () => {
+        if (!confirm(`${o.name} 을(를) 삭제할까요?`)) return;
+        await api("/api/delete", { kind: "output", name: o.name }); refresh(); } }, "✕")))));
+}
+
+/* ---------- 전체 그리기 ---------- */
+let restored = false;
+function render() {
+  if (!restored) { restoreSaved(); restored = true; }   // 처음 열 때만 저장된 선택을 불러온다
+  renderUploads(); renderPlayer(); renderScenes(); renderManual(); renderMark();
+  renderTimeline(); renderSubs(); renderPreviewClips(); renderOutputs(); renderSummary();
+  renderJob(S.job || {});
+  for (const id of ["step2", "step3", "step4"]) $(id).classList.toggle("locked", !S.source);
+}
+player.addEventListener("loadedmetadata", renderTimeline);
+
+refresh().catch((e) => toast("서버에 연결할 수 없습니다: " + e.message));
+</script>
+</body>
+</html>

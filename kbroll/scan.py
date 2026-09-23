@@ -50,18 +50,40 @@ def build_scenes(cuts: list[float], duration: float, min_length: float = 0.6) ->
     return scenes
 
 
-def make_thumb(source: str, at: float, workdir: str) -> str:
-    path = os.path.join(workdir, "thumb.jpg")
+def make_thumb(source: str, at: float, path: str, width: int = 320) -> bool:
+    """at 초 지점의 화면을 JPEG 로 저장한다."""
     proc = ffmpeg_util.run(
         ["-y", "-ss", f"{at:.3f}", "-i", source, "-frames:v", "1",
-         "-vf", "scale=320:-2", "-q:v", "5", path]
+         "-vf", f"scale={width}:-2", "-q:v", "5", path]
     )
-    if proc.returncode != 0 or not os.path.exists(path):
-        return ""
-    with open(path, "rb") as f:
-        data = base64.b64encode(f.read()).decode("ascii")
-    os.unlink(path)
-    return "data:image/jpeg;base64," + data
+    return proc.returncode == 0 and os.path.exists(path)
+
+
+def analyze(
+    source: str,
+    thumbs_dir: str,
+    *,
+    threshold: float = 0.3,
+    min_length: float = 0.6,
+    progress: Callable[[float], None] | None = None,
+    log: Callable[[str], None] = print,
+) -> list[Scene]:
+    """장면을 나누고 장면마다 미리보기 이미지를 thumbs_dir/scene_0000.jpg 로 저장한다."""
+    info = ffmpeg_util.probe(source)
+    if not info.duration:
+        raise ffmpeg_util.FFmpegError("영상 길이를 알 수 없습니다")
+    log("장면 전환 분석 중...")
+    cuts = detect_cuts(source, threshold)
+    scenes = build_scenes(cuts, info.duration, min_length)
+    log(f"장면 {len(scenes)}개 발견, 미리보기 이미지 생성 중...")
+    os.makedirs(thumbs_dir, exist_ok=True)
+    for i, sc in enumerate(scenes):
+        path = os.path.join(thumbs_dir, f"scene_{i:04d}.jpg")
+        if make_thumb(source, sc.start + (sc.end - sc.start) / 2, path):
+            sc.thumb = path
+        if progress:
+            progress((i + 1) / len(scenes))
+    return scenes
 
 
 def scan(
@@ -74,18 +96,14 @@ def scan(
     progress: Callable[[float], None] | None = None,
     log: Callable[[str], None] = print,
 ) -> list[Scene]:
-    info = ffmpeg_util.probe(source)
-    if not info.duration:
-        raise ffmpeg_util.FFmpegError("영상 길이를 알 수 없습니다")
-    log("장면 전환 분석 중...")
-    cuts = detect_cuts(source, threshold)
-    scenes = build_scenes(cuts, info.duration, min_length)
-    log(f"장면 {len(scenes)}개 발견, 미리보기 이미지 생성 중...")
     with tempfile.TemporaryDirectory() as tmp:
-        for i, sc in enumerate(scenes):
-            sc.thumb = make_thumb(source, sc.start + (sc.end - sc.start) / 2, tmp)
-            if progress:
-                progress((i + 1) / len(scenes))
+        scenes = analyze(source, tmp, threshold=threshold, min_length=min_length,
+                         progress=progress, log=log)
+        for sc in scenes:
+            if sc.thumb:
+                with open(sc.thumb, "rb") as f:
+                    data = base64.b64encode(f.read()).decode("ascii")
+                sc.thumb = "data:image/jpeg;base64," + data
 
     clips = []
     if clips_dir:
