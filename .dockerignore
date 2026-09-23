@@ -1,0 +1,8 @@
+.git
+tests
+**/__pycache__
+*.pyc
+kbroll_work
+*.mp4
+*.mov
+*.mkv

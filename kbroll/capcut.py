@@ -239,3 +239,58 @@ def open_folder(path: str) -> None:  # pragma: no cover - OS 마다 다름
         subprocess.run(["open", path], check=False)
     else:
         subprocess.run(["xdg-open", path], check=False)
+
+
+def _local_join(base: str, *parts: str) -> str:
+    """사용자 PC 의 경로 규칙(Windows 는 \\, Mac 은 /)에 맞춰 경로를 잇는다."""
+    windows = "\\" in base or re.match(r"^[A-Za-z]:", base) is not None
+    sep = "\\" if windows else "/"
+    return sep.join([base.rstrip("\\/"), *parts])
+
+
+def pack_draft_zip(draft_path: str, zip_path: str, local_drafts_folder: str) -> str:
+    """서버에서 만든 초안을 사용자 PC 로 옮길 수 있는 ZIP 으로 묶는다.
+
+    초안이 쓰는 모든 영상(원본·한국 영상·자막 조각)을 ZIP 안의 <초안이름>/kbroll_media/ 에 넣고,
+    초안 속 파일 경로를 '사용자 PC 의 CapCut 초안 폴더/<초안이름>/kbroll_media/파일' 로 바꾼다.
+    사용자는 ZIP 을 CapCut 초안 폴더에 풀기만 하면 된다.
+    """
+    import json
+    import zipfile
+
+    if not local_drafts_folder.strip():
+        raise ValueError("PC 의 CapCut 초안 폴더 경로가 필요합니다 (CapCut > 설정 > 초안 위치).")
+    draft_name = os.path.basename(os.path.normpath(draft_path))
+    content_file = os.path.join(draft_path, "draft_content.json")
+    with open(content_file, encoding="utf-8") as f:
+        content = json.load(f)
+
+    media: dict[str, str] = {}  # 서버 경로 → ZIP 안 파일 이름
+    used_names: set[str] = set()
+    for kind in ("videos", "audios"):
+        for mat in content.get("materials", {}).get(kind, []):
+            path = mat.get("path")
+            if not path or not os.path.isfile(path):
+                continue
+            if path not in media:
+                base, ext = os.path.splitext(os.path.basename(path))
+                name, n = base + ext, 1
+                while name in used_names:
+                    n += 1
+                    name = f"{base}_{n}{ext}"
+                used_names.add(name)
+                media[path] = name
+            mat["path"] = _local_join(local_drafts_folder, draft_name, "kbroll_media", media[path])
+
+    os.makedirs(os.path.dirname(zip_path) or ".", exist_ok=True)
+    tmp = zip_path + ".part"
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"{draft_name}/draft_content.json", json.dumps(content, ensure_ascii=False))
+        for name in os.listdir(draft_path):
+            full = os.path.join(draft_path, name)
+            if name != "draft_content.json" and os.path.isfile(full):
+                zf.write(full, f"{draft_name}/{name}")
+        for path, name in media.items():  # 영상은 이미 압축되어 있으므로 그대로 저장
+            zf.write(path, f"{draft_name}/kbroll_media/{name}", compress_type=zipfile.ZIP_STORED)
+    os.replace(tmp, zip_path)
+    return zip_path

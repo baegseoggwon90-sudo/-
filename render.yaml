@@ -1,0 +1,14 @@
+# Render(https://render.com) 에 올리는 설정. README 의 '인터넷 서버에 올리기' 참고.
+services:
+  - type: web
+    name: kbroll
+    runtime: docker
+    plan: starter            # 영구 디스크는 유료 플랜에서만 쓸 수 있습니다
+    healthCheckPath: /healthz
+    envVars:
+      - key: KBROLL_PASSWORD # 로그인 비밀번호 — 배포할 때 Render 화면에서 직접 입력
+        sync: false
+    disk:
+      name: kbroll-data
+      mountPath: /data       # 올린 영상·결과물·설정이 저장되는 곳
+      sizeGB: 20

@@ -19,4 +19,4 @@ build-backend = "setuptools.build_meta"
 packages = ["kbroll"]
 
 [tool.setuptools.package-data]
-kbroll = ["webui.html"]
+kbroll = ["webui.html", "login.html"]

@@ -105,3 +105,41 @@ def test_short_key_mask_does_not_overwrite(server):
     view = json.loads(request(base + "/api/settings")[2])
     request(base + "/api/settings", "POST", json.dumps({"pixabay_key": view["pixabay_key"]}).encode())
     assert project.settings()["pixabay_key"] == "short"
+
+
+@pytest.fixture
+def public_server(tmp_path):
+    project = web.Project(str(tmp_path / "wk"), public=True, password="secret-pw")
+    handler = type("H", (web.Handler,), {"project": project})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}", project
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def test_public_mode_requires_login(public_server):
+    base, project = public_server
+    status, _, body = request(base + "/")
+    assert status == 200 and "로그인".encode() in body and b"step1" not in body
+    assert request(base + "/api/state")[0] == 401
+    assert request(base + "/api/upload?kind=clip&name=a.png", "PUT", b"x")[0] == 401
+    assert request(base + "/api/login", "POST", b'{"password": "wrong"}')[0] == 401
+
+    status, headers, _ = request(base + "/api/login", "POST", b'{"password": "secret-pw"}')
+    assert status == 200
+    cookie = headers["Set-Cookie"].split(";")[0]
+    assert "HttpOnly" in headers["Set-Cookie"]
+    state = json.loads(request(base + "/api/state", headers={"Cookie": cookie})[2])
+    assert state["public"] and state["workdir"] == ""
+    # 서버 모드에서 CapCut 은 PC 폴더 경로가 있어야 한다
+    status, _, body = request(base + "/api/open-draft", "POST", b"{}", {"Cookie": cookie})
+    assert status == 400
+
+    request(base + "/api/logout", "POST", b"{}", {"Cookie": cookie})
+    assert request(base + "/api/state", headers={"Cookie": cookie})[0] == 401
+
+
+def test_public_mode_needs_password(tmp_path):
+    with pytest.raises(ValueError):
+        web.serve(str(tmp_path), public=True, password=None, open_browser=False)

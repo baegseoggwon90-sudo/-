@@ -103,9 +103,13 @@ def cmd_capcut(args: argparse.Namespace) -> int:
 def cmd_web(args: argparse.Namespace) -> int:
     from .web import serve
 
-    workdir = getattr(args, "workdir", None) or os.path.join(os.path.expanduser("~"), "kbroll_작업")
-    serve(workdir, host=getattr(args, "host", "127.0.0.1"), port=getattr(args, "port", 8765),
-          open_browser=getattr(args, "open", True))
+    public = getattr(args, "public", False) or os.environ.get("KBROLL_PUBLIC") == "1"
+    workdir = (getattr(args, "workdir", None) or os.environ.get("KBROLL_WORKDIR")
+               or os.path.join(os.path.expanduser("~"), "kbroll_작업"))
+    host = getattr(args, "host", None) or ("0.0.0.0" if public else "127.0.0.1")
+    port = getattr(args, "port", None) or int(os.environ.get("PORT", 8765))
+    serve(workdir, host=host, port=port, open_browser=getattr(args, "open", True) and not public,
+          public=public, password=os.environ.get("KBROLL_PASSWORD"))
     return 0
 
 
@@ -173,9 +177,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     w = sub.add_parser("web", help="브라우저에서 쓰는 편집 화면 실행 (기본)")
     w.add_argument("--workdir", help="작업 폴더 (기본: 홈폴더/kbroll_작업)")
-    w.add_argument("--port", type=int, default=8765, help="포트 번호 (기본 8765)")
-    w.add_argument("--host", default="127.0.0.1",
-                   help="접속 허용 주소. 같은 공유기의 다른 기기에서 쓰려면 0.0.0.0")
+    w.add_argument("--port", type=int, help="포트 번호 (기본: 환경변수 PORT 또는 8765)")
+    w.add_argument("--host", help="접속 허용 주소 (기본 127.0.0.1, --public 이면 0.0.0.0)")
+    w.add_argument("--public", action="store_true",
+                   help="인터넷 서버로 운영: 비밀번호(환경변수 KBROLL_PASSWORD) 로그인, CapCut 초안은 ZIP 으로")
     w.add_argument("--no-open", dest="open", action="store_false", help="브라우저 자동으로 열지 않기")
     w.set_defaults(func=cmd_web)
 

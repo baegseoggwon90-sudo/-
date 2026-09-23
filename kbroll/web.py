@@ -8,10 +8,12 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import threading
 import time
@@ -25,7 +27,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from . import ffmpeg_util, matcher
 from .ai import DEFAULT_MODEL, AIError, Claude
 from .capcut import (CAPCUT_SUB_MODES, CapCutError, capcut_available, default_draft_folder,
-                     export_draft, open_folder)
+                     export_draft, open_folder, pack_draft_zip)
 from .ffmpeg_util import IMAGE_EXTS, VIDEO_EXTS
 from .replace import (SUBTITLE_MODES, SubtitleOptions, assign_clips, preview_frame,
                       replace_segments)
@@ -46,9 +48,14 @@ def safe_name(name: str) -> str:
 class Project:
     """작업 폴더 하나 = 작업 하나. 상태는 state.json 에 저장된다."""
 
-    def __init__(self, root: str) -> None:
+    def __init__(self, root: str, *, public: bool = False, password: str | None = None) -> None:
         self.root = os.path.abspath(root)
-        for sub in ("source", "clips", "thumbs", "preview", "output"):
+        # public: 인터넷 서버로 운영 (비밀번호 로그인 필요, CapCut 초안은 ZIP 으로 내려받기)
+        self.public = public
+        self.password = password or None
+        self.sessions: set[str] = set()
+        self.failed_logins: dict[str, list[float]] = {}
+        for sub in ("source", "clips", "thumbs", "preview", "output", "capcut_drafts"):
             os.makedirs(os.path.join(self.root, sub), exist_ok=True)
         self.lock = threading.Lock()
         self.state = self._load()
@@ -158,11 +165,12 @@ class Project:
             "pixabay": bool(settings["pixabay_key"] or os.environ.get("PIXABAY_API_KEY")),
             "whisper": matcher.whisper_available(),
             "capcut": capcut_available(),
-            "capcut_folder": settings.get("capcut_folder") or default_draft_folder() or "",
+            "capcut_folder": settings.get("capcut_folder") or ("" if self.public else default_draft_folder() or ""),
         }
         return {"source": source, "clips": clips, "scenes": self.state["scenes"],
                 "saved": self.state["saved"], "outputs": outputs, "job": self.job_view(),
-                "workdir": self.root, "subtitle": self.state.get("subtitle") if self.subtitle_path() else None,
+                "workdir": "" if self.public else self.root, "public": self.public,
+                "login": bool(self.password), "subtitle": self.state.get("subtitle") if self.subtitle_path() else None,
                 "recommend": self.state.get("recommend"), "ai": ai}
 
     def job_view(self) -> dict:
@@ -246,8 +254,11 @@ def make_render_work(project: "Project", segments: list[Segment], subs: Subtitle
 
 
 def make_capcut_work(project: "Project", segments: list[Segment], subs: SubtitleOptions,
-                     folder: str, draft_name: str, shuffle: bool):
-    """CapCut 초안 만들기 작업 함수."""
+                     folder: str, draft_name: str, shuffle: bool, local_folder: str | None = None):
+    """CapCut 초안 만들기 작업 함수.
+
+    local_folder 가 있으면(서버 모드) 초안을 ZIP 으로 묶어 결과 목록에 올린다.
+    """
     source = project.source_path()
 
     def work(log, progress) -> None:
@@ -256,10 +267,18 @@ def make_capcut_work(project: "Project", segments: list[Segment], subs: Subtitle
         captions = matcher.load_subtitles(project.subtitle_path()) if project.subtitle_path() else None
         result = export_draft(source, plan, folder, draft_name, subs, captions=captions,
                               log=log, progress=progress)
-        project.job["draft_path"] = result.draft_path
         project.job["draft_name"] = result.draft_name
-        log(f"완료! CapCut 을 열면 초안 목록에 '{result.draft_name}' 이(가) 있습니다. "
-            "(안 보이면 CapCut 을 껐다 켜세요)")
+        if local_folder:
+            zip_name = f"{result.draft_name}_CapCut초안.zip"
+            log("초안과 영상들을 ZIP 으로 묶는 중...")
+            pack_draft_zip(result.draft_path, project.path("output", zip_name), local_folder)
+            shutil.rmtree(result.draft_path, ignore_errors=True)
+            project.job["output"] = zip_name
+            log(f"완료! '{zip_name}' 을 내려받아 PC 의 CapCut 초안 폴더에 압축을 푸세요.")
+        else:
+            project.job["draft_path"] = result.draft_path
+            log(f"완료! CapCut 을 열면 초안 목록에 '{result.draft_name}' 이(가) 있습니다. "
+                "(안 보이면 CapCut 을 껐다 켜세요)")
 
     return work
 
@@ -308,9 +327,77 @@ class Handler(BaseHTTPRequestHandler):
         host = self.headers.get("Host", "")
         return urlparse(origin).netloc == host
 
+    # ---- 로그인 (서버 모드) ----
+    def _cookie_token(self) -> str | None:
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            key, _, value = part.strip().partition("=")
+            if key == "kbroll_session":
+                return value
+        return None
+
+    def _authed(self) -> bool:
+        if not self.project.password:
+            return True
+        token = self._cookie_token()
+        return bool(token) and any(hmac.compare_digest(token, t) for t in self.project.sessions)
+
+    def _client_ip(self) -> str:
+        # 앞단 프록시가 맨 뒤에 붙인 값이 실제 접속 주소 (앞쪽 값은 사용자가 꾸밀 수 있음)
+        forwarded = self.headers.get("X-Forwarded-For", "")
+        return forwarded.split(",")[-1].strip() or self.client_address[0]
+
+    def api_login(self, body: dict) -> None:
+        project = self.project
+        ip = self._client_ip()
+        now = time.time()
+        recent = [t for t in project.failed_logins.get(ip, []) if now - t < 600]
+        if len(recent) >= 10:
+            return self.send_error_json("로그인 시도가 너무 많습니다. 10분 뒤 다시 시도하세요.", 429)
+        password = str(body.get("password", ""))
+        if not project.password or not hmac.compare_digest(password.encode(), project.password.encode()):
+            project.failed_logins[ip] = recent + [now]
+            time.sleep(1)
+            return self.send_error_json("비밀번호가 틀렸습니다", 401)
+        project.failed_logins.pop(ip, None)
+        token = secrets.token_urlsafe(32)
+        project.sessions.add(token)
+        secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
+        body_bytes = b'{"ok": true}'
+        self.send_response(200)
+        self.send_header("Set-Cookie", f"kbroll_session={token}; Path=/; HttpOnly; SameSite=Lax; "
+                                       f"Max-Age={30 * 24 * 3600}{secure}")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body_bytes)))
+        self.end_headers()
+        self.wfile.write(body_bytes)
+
+    def api_logout(self, body: dict) -> None:
+        self.project.sessions.discard(self._cookie_token() or "")
+        self.send_response(200)
+        self.send_header("Set-Cookie", "kbroll_session=; Path=/; Max-Age=0")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    def send_page(self, name: str) -> None:
+        page = resources.files("kbroll").joinpath(name).read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(page)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(page)
+
     # ---- 라우팅 ----
     def do_GET(self) -> None:
         route = urlparse(self.path).path
+        if route == "/healthz":  # 서버 상태 확인용 (로그인 불필요)
+            return self.send_json({"ok": True})
+        if not self._authed():
+            if route in ("/", "/index.html"):
+                return self.send_page("login.html")
+            return self.send_error_json("로그인이 필요합니다", 401)
         if route in ("/", "/index.html"):
             page = resources.files("kbroll").joinpath("webui.html").read_bytes()
             self.send_response(200)
@@ -333,6 +420,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         if not self._same_origin():
             return self.send_error_json("허용되지 않은 요청", 403)
+        if not self._authed():
+            return self.send_error_json("로그인이 필요합니다", 401)
         route = urlparse(self.path).path
         if route == "/api/upload":
             return self.upload()
@@ -342,6 +431,14 @@ class Handler(BaseHTTPRequestHandler):
         if not self._same_origin():
             return self.send_error_json("허용되지 않은 요청", 403)
         route = urlparse(self.path).path
+        if route in ("/api/login", "/api/logout"):
+            try:
+                body = self.read_json()
+            except ValueError:
+                body = {}
+            return (self.api_login if route == "/api/login" else self.api_logout)(body)
+        if not self._authed():
+            return self.send_error_json("로그인이 필요합니다", 401)
         try:
             body = self.read_json()
             handler = {
@@ -534,6 +631,7 @@ class Handler(BaseHTTPRequestHandler):
         to_capcut = body.get("target") == "capcut"
         subs = self._subs(body, capcut=to_capcut)
         capcut_folder = self._capcut_folder(body) if render_after and to_capcut else None
+        local_capcut = self._local_capcut_folder() if render_after and to_capcut else None
         if render_after and to_capcut and subs.mode == "text" and not project.subtitle_path():
             raise ValueError("텍스트 자막으로 넣으려면 자막 파일(SRT/VTT)을 먼저 올려주세요")
         quality = body.get("quality", "high")
@@ -583,8 +681,8 @@ class Handler(BaseHTTPRequestHandler):
                 if to_capcut:
                     name = os.path.splitext(project.state["source"])[0] + "_한국영상"
                     log("추천대로 CapCut 초안을 만듭니다...")
-                    make_capcut_work(project, segments, subs, capcut_folder, name, shuffle)(
-                        log, part(0.6, 1.0))
+                    make_capcut_work(project, segments, subs, capcut_folder, name, shuffle,
+                                     local_capcut)(log, part(0.6, 1.0))
                 else:
                     out_name, render = make_render_work(project, segments, subs, quality, shuffle)
                     project.job["output"] = out_name
@@ -695,6 +793,8 @@ class Handler(BaseHTTPRequestHandler):
         return segments
 
     def _capcut_folder(self, body: dict) -> str:
+        if self.project.public:
+            return self.project.path("capcut_drafts")
         folder = (body.get("capcut_folder") or self.project.settings().get("capcut_folder")
                   or default_draft_folder() or "").strip()
         if not folder:
@@ -703,6 +803,16 @@ class Handler(BaseHTTPRequestHandler):
         if not os.path.isdir(folder):
             raise ValueError(f"CapCut 초안 폴더가 없습니다: {folder}")
         return folder
+
+    def _local_capcut_folder(self) -> str | None:
+        """서버 모드일 때 사용자 PC 의 CapCut 초안 폴더 경로 (ZIP 속 경로에 씀)."""
+        if not self.project.public:
+            return None
+        local = (self.project.settings().get("capcut_folder") or "").strip()
+        if not local:
+            raise ValueError("설정에서 '내 PC 의 CapCut 초안 폴더' 경로를 입력하세요 "
+                             "(CapCut > 설정 > 초안 위치 에 보이는 경로).")
+        return local
 
     def api_capcut(self, body: dict) -> None:
         project = self.project
@@ -715,12 +825,15 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("텍스트 자막으로 넣으려면 2단계에서 자막 파일(SRT/VTT)을 먼저 올려주세요")
         folder = self._capcut_folder(body)
         name = body.get("draft_name") or os.path.splitext(project.state["source"])[0] + "_한국영상"
-        work = make_capcut_work(project, segments, subs, folder, name, bool(body.get("shuffle")))
+        work = make_capcut_work(project, segments, subs, folder, name, bool(body.get("shuffle")),
+                                self._local_capcut_folder())
         if not project.start_job("capcut", work):
             return self.send_error_json("다른 작업이 진행 중입니다", 409)
         self.send_json({"ok": True})
 
     def api_open_draft(self, body: dict) -> None:
+        if self.project.public:
+            return self.send_error_json("서버에서는 폴더를 열 수 없습니다")
         path = self.project.job.get("draft_path")
         if not path or not os.path.isdir(path):
             return self.send_error_json("열 초안 폴더가 없습니다")
@@ -755,11 +868,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, "output": out_name})
 
 
-def serve(workdir: str, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
-    project = Project(workdir)
+def serve(workdir: str, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True,
+          public: bool = False, password: str | None = None) -> None:
+    if public and not password:
+        raise ValueError("서버 모드(--public)는 비밀번호가 꼭 필요합니다. "
+                         "환경변수 KBROLL_PASSWORD 에 비밀번호를 넣어주세요.")
+    project = Project(workdir, public=public, password=password)
     handler = type("BoundHandler", (Handler,), {"project": project})
     httpd = None
-    for p in range(port, port + 20):  # 포트가 사용 중이면 다음 번호로
+    for p in (range(port, port + 1) if public else range(port, port + 20)):  # 사용 중이면 다음 번호로
         try:
             httpd = ThreadingHTTPServer((host, p), handler)
             break
@@ -771,6 +888,8 @@ def serve(workdir: str, host: str = "127.0.0.1", port: int = 8765, open_browser:
     url = f"http://{shown_host}:{httpd.server_address[1]}/"
     print(f"한국 영상 교체기 실행 중: {url}")
     print(f"작업 폴더: {project.root}")
+    if public:
+        print("서버 모드: 비밀번호 로그인이 켜져 있습니다.")
     print("끝내려면 이 창에서 Ctrl+C 를 누르세요.")
     if open_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()

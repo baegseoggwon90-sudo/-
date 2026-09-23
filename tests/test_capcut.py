@@ -98,3 +98,23 @@ def test_key_piece_is_transparent(media):
     piece = os.path.join(result.draft_path, "kbroll_media", "subtitle_000.mov")
     out = subprocess.run([FFMPEG, "-hide_banner", "-i", piece], capture_output=True, text=True).stderr
     assert "yuva444p" in out
+
+
+def test_pack_draft_zip_rewrites_paths(media, tmp_path):
+    import zipfile
+    from kbroll.capcut import pack_draft_zip
+
+    src, clips, drafts = media
+    plan = assign_clips([Segment(2, 5)], [os.path.join(clips, "tall.mp4")])
+    result = export_draft(src, plan, drafts, "zipme", SubtitleOptions(mode="band"), log=lambda _: None)
+    win = r"C:\Users\kim\AppData\Local\CapCut\User Data\Projects\com.lveditor.draft"
+    zf = zipfile.ZipFile(pack_draft_zip(result.draft_path, str(tmp_path / "d.zip"), win))
+    names = set(zf.namelist())
+    assert {"zipme/draft_content.json", "zipme/kbroll_media/orig.mp4", "zipme/kbroll_media/tall.mp4",
+            "zipme/kbroll_media/subtitle_000.mp4"} <= names
+    paths = [m["path"] for m in json.loads(zf.read("zipme/draft_content.json"))["materials"]["videos"]]
+    assert all(p.startswith(win + "\\zipme\\kbroll_media\\") for p in paths)
+    mac = "/Users/kim/Movies/CapCut/User Data/Projects/com.lveditor.draft"
+    zf2 = zipfile.ZipFile(pack_draft_zip(result.draft_path, str(tmp_path / "m.zip"), mac))
+    paths = [m["path"] for m in json.loads(zf2.read("zipme/draft_content.json"))["materials"]["videos"]]
+    assert all(p.startswith(mac + "/zipme/kbroll_media/") for p in paths)
