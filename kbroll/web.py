@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import threading
 import time
 import traceback
@@ -24,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from . import ffmpeg_util, matcher
+from . import ffmpeg_util, matcher, userconfig
 from .ai import DEFAULT_MODEL, AIError, Claude
 from .capcut import (CAPCUT_SUB_MODES, CapCutError, capcut_available, default_draft_folder,
                      export_draft, open_folder, pack_draft_zip)
@@ -48,11 +49,15 @@ def safe_name(name: str) -> str:
 class Project:
     """작업 폴더 하나 = 작업 하나. 상태는 state.json 에 저장된다."""
 
-    def __init__(self, root: str, *, public: bool = False, password: str | None = None) -> None:
+    def __init__(self, root: str, *, public: bool = False, password: str | None = None,
+                 password_hash: str | None = None, tunnel: bool = False) -> None:
         self.root = os.path.abspath(root)
         # public: 인터넷 서버로 운영 (비밀번호 로그인 필요, CapCut 초안은 ZIP 으로 내려받기)
         self.public = public
-        self.password = password or None
+        # 비밀번호는 해시로만 들고 있는다
+        self.password_hash = userconfig.hash_password(password) if password else (password_hash or None)
+        self.tunnel = tunnel          # Cloudflare 터널로 열려 있으면 Cf-Connecting-Ip 를 믿는다
+        self.public_url: str | None = None
         self.sessions: set[str] = set()
         self.failed_logins: dict[str, list[float]] = {}
         for sub in ("source", "clips", "thumbs", "preview", "output", "capcut_drafts"):
@@ -122,6 +127,13 @@ class Project:
         except OSError:
             pass
 
+    def capcut_direct_folder(self) -> str | None:
+        """이 컴퓨터에 CapCut 초안 폴더가 있으면 그 경로 (있으면 ZIP 없이 바로 저장한다)."""
+        folder = (self.settings().get("capcut_folder") or "").strip()
+        if folder and os.path.isdir(folder):
+            return folder
+        return None if folder and self.public else default_draft_folder()
+
     def subtitle_path(self) -> str | None:
         name = self.state.get("subtitle")
         return self.path("source", name) if name and os.path.exists(self.path("source", name)) else None
@@ -166,11 +178,12 @@ class Project:
             "whisper": matcher.whisper_available(),
             "capcut": capcut_available(),
             "capcut_folder": settings.get("capcut_folder") or ("" if self.public else default_draft_folder() or ""),
+            "capcut_direct": bool(self.capcut_direct_folder()),
         }
         return {"source": source, "clips": clips, "scenes": self.state["scenes"],
                 "saved": self.state["saved"], "outputs": outputs, "job": self.job_view(),
-                "workdir": "" if self.public else self.root, "public": self.public,
-                "login": bool(self.password), "subtitle": self.state.get("subtitle") if self.subtitle_path() else None,
+                "workdir": self.root, "public": self.public, "public_url": self.public_url,
+                "login": bool(self.password_hash), "subtitle": self.state.get("subtitle") if self.subtitle_path() else None,
                 "recommend": self.state.get("recommend"), "ai": ai}
 
     def job_view(self) -> dict:
@@ -324,8 +337,8 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if not origin:
             return True
-        host = self.headers.get("Host", "")
-        return urlparse(origin).netloc == host
+        hosts = {self.headers.get("Host", ""), self.headers.get("X-Forwarded-Host", "")}
+        return urlparse(origin).netloc in hosts - {""}
 
     # ---- 로그인 (서버 모드) ----
     def _cookie_token(self) -> str | None:
@@ -336,12 +349,14 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
     def _authed(self) -> bool:
-        if not self.project.password:
+        if not self.project.password_hash:
             return True
         token = self._cookie_token()
         return bool(token) and any(hmac.compare_digest(token, t) for t in self.project.sessions)
 
     def _client_ip(self) -> str:
+        if self.project.tunnel and self.headers.get("Cf-Connecting-Ip"):
+            return self.headers["Cf-Connecting-Ip"]  # 터널 모드: 모든 요청이 Cloudflare 를 거친다
         # 앞단 프록시가 맨 뒤에 붙인 값이 실제 접속 주소 (앞쪽 값은 사용자가 꾸밀 수 있음)
         forwarded = self.headers.get("X-Forwarded-For", "")
         return forwarded.split(",")[-1].strip() or self.client_address[0]
@@ -354,7 +369,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(recent) >= 10:
             return self.send_error_json("로그인 시도가 너무 많습니다. 10분 뒤 다시 시도하세요.", 429)
         password = str(body.get("password", ""))
-        if not project.password or not hmac.compare_digest(password.encode(), project.password.encode()):
+        if not project.password_hash or not userconfig.check_password(password, project.password_hash):
             project.failed_logins[ip] = recent + [now]
             time.sleep(1)
             return self.send_error_json("비밀번호가 틀렸습니다", 401)
@@ -451,6 +466,9 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/auto": self.api_auto,
                 "/api/capcut": self.api_capcut,
                 "/api/open-draft": self.api_open_draft,
+                "/api/workdir": self.api_workdir,
+                "/api/pick-folder": self.api_pick_folder,
+                "/api/open-output": self.api_open_output,
             }.get(route)
             if not handler:
                 return self.send_error_json("없는 주소입니다", 404)
@@ -793,10 +811,12 @@ class Handler(BaseHTTPRequestHandler):
         return segments
 
     def _capcut_folder(self, body: dict) -> str:
+        direct = self.project.capcut_direct_folder()
+        if direct:
+            return direct
         if self.project.public:
             return self.project.path("capcut_drafts")
-        folder = (body.get("capcut_folder") or self.project.settings().get("capcut_folder")
-                  or default_draft_folder() or "").strip()
+        folder = (self.project.settings().get("capcut_folder") or "").strip()
         if not folder:
             raise ValueError("CapCut 초안 폴더를 찾지 못했습니다. CapCut > 설정 > 초안 위치 의 경로를 "
                              "AI 설정의 'CapCut 초안 폴더' 에 넣어주세요.")
@@ -806,7 +826,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _local_capcut_folder(self) -> str | None:
         """서버 모드일 때 사용자 PC 의 CapCut 초안 폴더 경로 (ZIP 속 경로에 씀)."""
-        if not self.project.public:
+        if not self.project.public or self.project.capcut_direct_folder():
             return None
         local = (self.project.settings().get("capcut_folder") or "").strip()
         if not local:
@@ -829,6 +849,64 @@ class Handler(BaseHTTPRequestHandler):
                                 self._local_capcut_folder())
         if not project.start_job("capcut", work):
             return self.send_error_json("다른 작업이 진행 중입니다", 409)
+        self.send_json({"ok": True})
+
+    def api_workdir(self, body: dict) -> None:
+        """작업 폴더(올린 영상·결과물·설정이 저장되는 곳)를 바꾼다."""
+        old = self.project
+        raw = str(body.get("path", "")).strip().strip('"')
+        if not raw:
+            raise ValueError("저장할 폴더 경로를 입력하세요")
+        path = os.path.abspath(os.path.expanduser(raw))
+        if old.job["status"] == "running":
+            return self.send_error_json("작업이 끝난 뒤에 바꿔 주세요", 409)
+        try:
+            os.makedirs(path, exist_ok=True)
+            probe = os.path.join(path, ".kbroll_write_test")
+            with open(probe, "w") as f:
+                f.write("ok")
+            os.unlink(probe)
+        except OSError as exc:
+            raise ValueError(f"이 폴더에 저장할 수 없습니다: {path} ({exc.strerror or exc})") from exc
+        if path != old.root:
+            new = Project(path, public=old.public, password_hash=old.password_hash, tunnel=old.tunnel)
+            new.sessions, new.failed_logins, new.public_url = old.sessions, old.failed_logins, old.public_url
+            if not os.path.exists(new.path("settings.json")) and os.path.exists(old.path("settings.json")):
+                shutil.copy2(old.path("settings.json"), new.path("settings.json"))  # API 키 등은 따라간다
+            type(self).project = new
+            userconfig.save(workdir=path)
+        self.send_json({"ok": True, "workdir": path})
+
+    def api_pick_folder(self, body: dict) -> None:
+        """이 컴퓨터에서 '폴더 선택' 창을 띄운다 (내 PC 에서 쓸 때만)."""
+        if self.project.public:
+            return self.send_error_json("서버 모드에서는 폴더 경로를 직접 입력해 주세요")
+        result: dict = {}
+
+        def ask() -> None:
+            try:
+                import tkinter as tk
+                from tkinter import filedialog
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes("-topmost", True)
+                result["path"] = filedialog.askdirectory(
+                    title=body.get("title") or "폴더 선택", initialdir=body.get("start") or None) or ""
+                root.destroy()
+            except Exception as exc:  # tkinter 가 없거나 화면이 없는 경우
+                result["error"] = str(exc)
+
+        t = threading.Thread(target=ask, daemon=True)
+        t.start()
+        t.join(600)
+        if "error" in result or "path" not in result:
+            return self.send_error_json("폴더 선택 창을 열 수 없습니다. 경로를 직접 입력해 주세요.")
+        self.send_json({"path": os.path.normpath(result["path"]) if result["path"] else ""})
+
+    def api_open_output(self, body: dict) -> None:
+        if self.project.public:
+            return self.send_error_json("서버에서는 폴더를 열 수 없습니다")
+        open_folder(self.project.path("output"))
         self.send_json({"ok": True})
 
     def api_open_draft(self, body: dict) -> None:
@@ -869,11 +947,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(workdir: str, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True,
-          public: bool = False, password: str | None = None) -> None:
-    if public and not password:
+          public: bool = False, password: str | None = None, password_hash: str | None = None,
+          tunnel: bool = False) -> None:
+    if public and not (password or password_hash):
         raise ValueError("서버 모드(--public)는 비밀번호가 꼭 필요합니다. "
                          "환경변수 KBROLL_PASSWORD 에 비밀번호를 넣어주세요.")
-    project = Project(workdir, public=public, password=password)
+    project = Project(workdir, public=public, password=password, password_hash=password_hash,
+                      tunnel=tunnel)
     handler = type("BoundHandler", (Handler,), {"project": project})
     httpd = None
     for p in (range(port, port + 1) if public else range(port, port + 20)):  # 사용 중이면 다음 번호로
@@ -891,11 +971,31 @@ def serve(workdir: str, host: str = "127.0.0.1", port: int = 8765, open_browser:
     if public:
         print("서버 모드: 비밀번호 로그인이 켜져 있습니다.")
     print("끝내려면 이 창에서 Ctrl+C 를 누르세요.")
+    tun = None
+    if tunnel:
+        from .tunnel import Tunnel, TunnelError
+        try:
+            tun = Tunnel(httpd.server_address[1])
+            project.public_url = tun.start()
+            line = "=" * 60
+            print(f"\n{line}\n  인터넷 접속 주소:  {project.public_url}\n"
+                  f"  (휴대폰·다른 컴퓨터에서 이 주소로 접속해 비밀번호로 로그인)\n"
+                  f"  주소는 프로그램을 다시 켤 때마다 바뀝니다.\n{line}\n")
+        except (TunnelError, OSError) as exc:
+            print(f"⚠ 인터넷 주소를 만들지 못했습니다: {exc}\n  이 컴퓨터에서는 {url} 로 계속 쓸 수 있습니다.")
     if open_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+
+    def _stop(*_args):  # 종료 신호를 받아도 터널까지 정리하고 끝낸다
+        raise KeyboardInterrupt
+
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, _stop)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\n종료합니다.")
     finally:
+        if tun:
+            tun.stop()
         httpd.server_close()

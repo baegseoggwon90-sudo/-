@@ -100,16 +100,51 @@ def cmd_capcut(args: argparse.Namespace) -> int:
     return 0
 
 
+def _server_password(reset: bool) -> tuple[str | None, str | None]:
+    """서버 모드 비밀번호: 환경변수 > 저장된 해시 > 처음 한 번 물어보고 해시로 저장."""
+    from . import userconfig
+
+    env = os.environ.get("KBROLL_PASSWORD")
+    if env:
+        return env, None
+    saved = userconfig.load().get("password_hash")
+    if saved and not reset:
+        return None, saved
+    if not sys.stdin or not sys.stdin.isatty():
+        raise ValueError("서버 모드 비밀번호가 없습니다. 환경변수 KBROLL_PASSWORD 에 넣어주세요.")
+    import getpass
+
+    print("밖에서 접속할 때 쓸 비밀번호를 정해 주세요 (8자 이상, 한 번만 물어봅니다).")
+    while True:
+        first = getpass.getpass("비밀번호: ")
+        if len(first) < 8:
+            print("8자 이상으로 정해 주세요.")
+            continue
+        if getpass.getpass("한 번 더: ") != first:
+            print("두 번 입력한 비밀번호가 다릅니다.")
+            continue
+        break
+    hashed = userconfig.hash_password(first)
+    userconfig.save(password_hash=hashed)
+    print("비밀번호를 저장했습니다. (바꾸려면 --reset-password)")
+    return None, hashed
+
+
 def cmd_web(args: argparse.Namespace) -> int:
+    from . import userconfig
     from .web import serve
 
-    public = getattr(args, "public", False) or os.environ.get("KBROLL_PUBLIC") == "1"
+    tunnel = getattr(args, "tunnel", False)
+    public = tunnel or getattr(args, "public", False) or os.environ.get("KBROLL_PUBLIC") == "1"
     workdir = (getattr(args, "workdir", None) or os.environ.get("KBROLL_WORKDIR")
-               or os.path.join(os.path.expanduser("~"), "kbroll_작업"))
-    host = getattr(args, "host", None) or ("0.0.0.0" if public else "127.0.0.1")
+               or userconfig.default_workdir())
+    # 터널은 이 컴퓨터 안에서 연결하므로 127.0.0.1 만 열어도 된다 (같은 와이파이에 노출되지 않음)
+    host = getattr(args, "host", None) or ("0.0.0.0" if public and not tunnel else "127.0.0.1")
     port = getattr(args, "port", None) or int(os.environ.get("PORT", 8765))
-    serve(workdir, host=host, port=port, open_browser=getattr(args, "open", True) and not public,
-          public=public, password=os.environ.get("KBROLL_PASSWORD"))
+    password, password_hash = (_server_password(getattr(args, "reset_password", False))
+                               if public else (None, None))
+    serve(workdir, host=host, port=port, open_browser=getattr(args, "open", True) and (tunnel or not public),
+          public=public, password=password, password_hash=password_hash, tunnel=tunnel)
     return 0
 
 
@@ -176,11 +211,14 @@ def build_parser() -> argparse.ArgumentParser:
     c.set_defaults(func=cmd_capcut)
 
     w = sub.add_parser("web", help="브라우저에서 쓰는 편집 화면 실행 (기본)")
-    w.add_argument("--workdir", help="작업 폴더 (기본: 홈폴더/kbroll_작업)")
+    w.add_argument("--workdir", help="작업 폴더 (기본: 화면에서 고른 폴더, 없으면 홈폴더/kbroll_작업)")
     w.add_argument("--port", type=int, help="포트 번호 (기본: 환경변수 PORT 또는 8765)")
     w.add_argument("--host", help="접속 허용 주소 (기본 127.0.0.1, --public 이면 0.0.0.0)")
     w.add_argument("--public", action="store_true",
                    help="인터넷 서버로 운영: 비밀번호(환경변수 KBROLL_PASSWORD) 로그인, CapCut 초안은 ZIP 으로")
+    w.add_argument("--tunnel", action="store_true",
+                   help="내 컴퓨터를 서버로: Cloudflare 임시 인터넷 주소를 만들고 비밀번호 로그인을 켭니다")
+    w.add_argument("--reset-password", action="store_true", help="서버 모드 비밀번호 다시 정하기")
     w.add_argument("--no-open", dest="open", action="store_false", help="브라우저 자동으로 열지 않기")
     w.set_defaults(func=cmd_web)
 

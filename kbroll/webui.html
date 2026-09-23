@@ -137,6 +137,9 @@
   dialog::backdrop { background:rgba(0,0,0,.4); }
   dialog h3 { margin:0 0 12px; }
   dialog label { display:block; font-size:14px; margin:10px 0 4px; }
+  .pathrow { display:flex; gap:6px; }
+  .pathrow input { flex:1; min-width:0; }
+  a.pill { text-decoration:none; color:var(--accent); }
   dialog input[type=text], dialog input[type=password] { width:100%; font:inherit; padding:7px 10px; border-radius:8px;
            border:1px solid var(--line); background:var(--bg); color:var(--text); }
   dialog a { color:var(--accent); }
@@ -151,12 +154,16 @@
 <body>
 <header>
   <h1>🎬 한국 영상 교체기</h1>
+  <a class="pill" id="publicUrl" hidden target="_blank" rel="noopener" title="밖에서 접속하는 주소 (누르면 복사)"></a>
   <span class="pill" id="jobPill">대기 중</span>
   <button class="small" id="openSettings">⚙ 설정</button>
   <button class="small" id="logoutBtn" hidden>로그아웃</button>
 </header>
 <dialog id="settingsDlg">
   <h3>설정</h3>
+  <label for="setWorkdir">저장 폴더 <span class="muted">— 올린 영상·결과물·설정이 저장되는 곳 (예: D:\영상작업)</span></label>
+  <div class="pathrow"><input type="text" id="setWorkdir" autocomplete="off"><button class="small" id="pickWorkdir">찾아보기</button></div>
+  <p class="muted" id="workdirNote" style="margin:4px 0 0">바꾸면 새 폴더에서 새로 시작합니다. 원래 폴더의 파일은 지워지지 않고 그대로 남아 있습니다.</p>
   <p class="muted" id="keyNote">키는 이 PC 의 작업 폴더(settings.json)에만 저장됩니다.</p>
   <label for="setAnthropic">Claude API 키 <span class="muted">— <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> 에서 발급 (사용량만큼 요금)</span></label>
   <input type="password" id="setAnthropic" autocomplete="off" placeholder="sk-ant-...">
@@ -165,7 +172,7 @@
   <label for="setModel">Claude 모델</label>
   <input type="text" id="setModel" placeholder="claude-opus-5">
   <label for="setCapcut"><span id="capcutLabel">CapCut 초안 폴더</span> <span class="muted" id="capcutHint">— CapCut &gt; 설정 &gt; 초안 위치 의 경로 (비우면 자동으로 찾음)</span></label>
-  <input type="text" id="setCapcut" autocomplete="off">
+  <div class="pathrow"><input type="text" id="setCapcut" autocomplete="off"><button class="small" id="pickCapcut">찾아보기</button></div>
   <div class="row" style="margin-top:16px; justify-content:flex-end">
     <button id="closeSettings">취소</button>
     <button class="primary" id="saveSettings">저장</button>
@@ -329,6 +336,10 @@
       <div class="muted" id="jobText"></div>
       <pre class="log" id="jobLog"></pre>
       <div class="error" id="jobError"></div>
+    </div>
+    <div class="row" id="outputTools" style="margin-top:12px" hidden>
+      <span class="muted" id="outputPath"></span>
+      <button class="small" id="openOutput">결과 폴더 열기</button>
     </div>
     <div class="outputs" id="outputs"></div>
   </section>
@@ -627,6 +638,7 @@ $("openSettings").onclick = async () => {
   try {
     const st = await api("/api/settings");
     $("setAnthropic").value = st.anthropic_key; $("setPixabay").value = st.pixabay_key; $("setModel").value = st.model;
+    $("setWorkdir").value = S.workdir || "";
     $("setCapcut").value = st.capcut_folder; $("setCapcut").placeholder = st.capcut_detected || "예: C:\\Users\\이름\\AppData\\Local\\CapCut\\User Data\\Projects\\com.lveditor.draft";
     $("setAnthropic").placeholder = st.env_anthropic ? "환경변수 ANTHROPIC_API_KEY 사용 중" : "sk-ant-...";
     $("setPixabay").placeholder = st.env_pixabay ? "환경변수 PIXABAY_API_KEY 사용 중" : "";
@@ -637,10 +649,30 @@ $("logoutBtn").onclick = async () => { await api("/api/logout", {}).catch(() => 
 $("closeSettings").onclick = () => $("settingsDlg").close();
 $("saveSettings").onclick = async () => {
   try {
+    const workdir = $("setWorkdir").value.trim();
+    if (workdir && workdir !== S.workdir) {
+      if (S.job?.status === "running") throw new Error("작업이 끝난 뒤에 저장 폴더를 바꿔 주세요");
+      await api("/api/workdir", { path: workdir });
+      picked.clear(); manual = []; restored = false;   // 새 폴더의 작업을 불러온다
+    }
     await api("/api/settings", { anthropic_key: $("setAnthropic").value, pixabay_key: $("setPixabay").value,
                                  model: $("setModel").value, capcut_folder: $("setCapcut").value });
-    $("settingsDlg").close(); toast("AI 설정을 저장했습니다."); refresh();
+    $("settingsDlg").close(); toast("설정을 저장했습니다."); refresh();
   } catch (e) { toast(e.message); }
+};
+async function pickFolder(input, title) {
+  try {
+    const r = await api("/api/pick-folder", { title, start: input.value });
+    if (r.path) input.value = r.path;
+  } catch (e) { toast(e.message); }
+}
+$("pickWorkdir").onclick = () => pickFolder($("setWorkdir"), "저장 폴더 선택");
+$("pickCapcut").onclick = () => pickFolder($("setCapcut"), "CapCut 초안 폴더 선택");
+$("openOutput").onclick = () => api("/api/open-output", {}).catch((e) => toast(e.message));
+$("publicUrl").onclick = (e) => {
+  e.preventDefault();
+  navigator.clipboard?.writeText(S.public_url).then(() => toast("인터넷 주소를 복사했습니다: " + S.public_url),
+    () => toast(S.public_url));
 };
 
 $("fileSub").addEventListener("change", async () => {
@@ -733,6 +765,7 @@ function renderTarget() {
   $("renderBtn").textContent = cc ? "CapCut 초안 만들기" : "영상 만들기";
   const ai = S.ai || {};
   $("capcutInfo").textContent = !cc ? "" : !ai.capcut ? "⚠ pycapcut 이 설치되어 있지 않습니다 (pip install pycapcut)"
+    : ai.capcut_direct ? "저장 위치: " + ai.capcut_folder
     : S.public ? (ai.capcut_folder ? "ZIP 으로 내려받습니다 · PC 초안 폴더: " + ai.capcut_folder
                                    : "⚠ ⚙ 설정에서 '내 PC 의 CapCut 초안 폴더' 경로를 입력하세요")
     : ai.capcut_folder ? "저장 위치: " + ai.capcut_folder : "⚠ ⚙ 설정에서 CapCut 초안 폴더를 지정하세요";
@@ -767,7 +800,8 @@ function renderDraft(job) {
     el("div", {}, el("span", { class: "title" }, "✅ CapCut 초안을 만들었습니다: "), el("b", {}, job.draft_name)),
     el("div", { class: "muted" }, "CapCut 을 열면 홈 화면 초안 목록에 있습니다. 안 보이면 CapCut 을 완전히 껐다가 다시 켜세요. " +
       "확인 후 CapCut 에서 내보내기(Export) 하면 됩니다."),
-    el("div", { class: "row" }, el("button", { class: "small", onclick: () => api("/api/open-draft", {}).catch((e) => toast(e.message)) }, "초안 폴더 열기")));
+    S.public ? null : el("div", { class: "row" }, el("button", { class: "small",
+      onclick: () => api("/api/open-draft", {}).catch((e) => toast(e.message)) }, "초안 폴더 열기")));
 }
 
 function renderJob(job) {
@@ -840,6 +874,12 @@ let restored = false;
 function render() {
   if (!restored) { restoreSaved(); restored = true; }   // 처음 열 때만 저장된 선택을 불러온다
   $("logoutBtn").hidden = !S.login;
+  $("publicUrl").hidden = !S.public_url;
+  if (S.public_url) { $("publicUrl").textContent = "🌐 " + S.public_url.replace("https://", ""); $("publicUrl").href = S.public_url; }
+  $("pickWorkdir").hidden = $("pickCapcut").hidden = !!S.public;
+  $("outputTools").hidden = !S.workdir;
+  $("openOutput").hidden = !!S.public;
+  $("outputPath").textContent = S.workdir ? "결과물 저장 위치: " + S.workdir.replace(/[\\/]+$/, "") + (S.workdir.includes("\\") ? "\\" : "/") + "output" : "";
   $("keyNote").textContent = S.public ? "키는 서버의 작업 폴더(settings.json)에 저장되며, 화면에는 가려서 보여줍니다."
                                       : "키는 이 PC 의 작업 폴더(settings.json)에만 저장됩니다.";
   $("capcutLabel").textContent = S.public ? "내 PC 의 CapCut 초안 폴더" : "CapCut 초안 폴더";

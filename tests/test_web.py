@@ -131,7 +131,7 @@ def test_public_mode_requires_login(public_server):
     cookie = headers["Set-Cookie"].split(";")[0]
     assert "HttpOnly" in headers["Set-Cookie"]
     state = json.loads(request(base + "/api/state", headers={"Cookie": cookie})[2])
-    assert state["public"] and state["workdir"] == ""
+    assert state["public"] and state["workdir"] == project.root
     # 서버 모드에서 CapCut 은 PC 폴더 경로가 있어야 한다
     status, _, body = request(base + "/api/open-draft", "POST", b"{}", {"Cookie": cookie})
     assert status == 400
@@ -143,3 +143,53 @@ def test_public_mode_requires_login(public_server):
 def test_public_mode_needs_password(tmp_path):
     with pytest.raises(ValueError):
         web.serve(str(tmp_path), public=True, password=None, open_browser=False)
+
+
+def test_switch_workdir_keeps_settings(server, tmp_path):
+    base, project = server
+    request(base + "/api/settings", "POST", json.dumps({"pixabay_key": "pixa-123456789012"}).encode())
+    new_dir = tmp_path / "D드라이브" / "영상작업"
+    status, _, data = request(base + "/api/workdir", "POST", json.dumps({"path": str(new_dir)}).encode())
+    assert status == 200 and json.loads(data)["workdir"] == str(new_dir)
+    state = json.loads(request(base + "/api/state")[2])
+    assert state["workdir"] == str(new_dir) and state["source"] is None
+    assert (new_dir / "output").is_dir() and (new_dir / "settings.json").exists()
+    assert state["ai"]["pixabay"]  # 설정(API 키)은 새 폴더로 따라간다
+    from kbroll import userconfig
+    assert userconfig.load()["workdir"] == str(new_dir)  # 다음에 켤 때도 이 폴더
+
+
+def test_switch_workdir_rejects_bad_path(server, tmp_path):
+    base, _ = server
+    blocker = tmp_path / "file.txt"
+    blocker.write_text("x")
+    status, _, data = request(base + "/api/workdir", "POST",
+                              json.dumps({"path": str(blocker / "sub")}).encode())
+    assert status == 400 and "저장할 수 없습니다" in json.loads(data)["error"]
+
+
+def test_login_with_stored_hash(tmp_path):
+    from kbroll import userconfig
+    project = web.Project(str(tmp_path / "wk"), public=True,
+                          password_hash=userconfig.hash_password("my-long-pass"))
+    handler = type("H", (web.Handler,), {"project": project})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        assert request(base + "/api/login", "POST", b'{"password": "nope-nope"}')[0] == 401
+        assert request(base + "/api/login", "POST", b'{"password": "my-long-pass"}')[0] == 200
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_capcut_direct_when_folder_exists_on_this_pc(tmp_path):
+    project = web.Project(str(tmp_path / "wk"), public=True, password="pw-12345678")
+    assert project.capcut_direct_folder() is None          # 서버(Render 등): 폴더가 없으니 ZIP
+    project.save_settings({**project.settings(), "capcut_folder": r"C:\Users\kim\CapCut"})
+    assert project.capcut_direct_folder() is None
+    drafts = tmp_path / "CapCut Drafts"
+    drafts.mkdir()
+    project.save_settings({**project.settings(), "capcut_folder": str(drafts)})
+    assert project.capcut_direct_folder() == str(drafts)  # 내 PC 가 서버: 바로 저장
