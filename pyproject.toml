@@ -3,7 +3,10 @@ name = "kbroll"
 version = "0.1.0"
 description = "나레이션 구간의 외국 영상을 한국 영상으로 교체 (음성·자막은 원본 유지)"
 requires-python = ">=3.9"
-dependencies = ["imageio-ffmpeg>=0.4.9"]
+dependencies = ["imageio-ffmpeg>=0.4.9", "anthropic>=1.8"]
+
+[project.optional-dependencies]
+whisper = ["faster-whisper>=1.0"]
 
 [project.scripts]
 kbroll = "kbroll.cli:main"

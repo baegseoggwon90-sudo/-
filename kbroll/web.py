@@ -22,7 +22,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from . import ffmpeg_util
+from . import ffmpeg_util, matcher
+from .ai import DEFAULT_MODEL, AIError, Claude
 from .ffmpeg_util import IMAGE_EXTS, VIDEO_EXTS
 from .replace import SUBTITLE_MODES, SubtitleOptions, preview_frame, replace_segments
 from .scan import analyze
@@ -63,6 +64,9 @@ class Project:
         state.setdefault("source", None)
         state.setdefault("scenes", [])
         state.setdefault("saved", {})
+        state.setdefault("subtitle", None)
+        state.setdefault("recommend", None)
+        state.setdefault("credits", {})
         if state["source"] and not os.path.exists(self.path("source", state["source"])):
             state["source"], state["scenes"] = None, []
         return state
@@ -85,6 +89,31 @@ class Project:
         if not full.startswith(self.root + os.sep) or not os.path.isfile(full):
             return None
         return full
+
+    # ---- 설정 (API 키) ----
+    def settings(self) -> dict:
+        try:
+            with open(self.path("settings.json"), encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        data.setdefault("anthropic_key", "")
+        data.setdefault("pixabay_key", "")
+        data.setdefault("model", "")
+        return data
+
+    def save_settings(self, data: dict) -> None:
+        path = self.path("settings.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        try:
+            os.chmod(path, 0o600)  # 키가 들어 있으므로 본인만 읽을 수 있게
+        except OSError:
+            pass
+
+    def subtitle_path(self) -> str | None:
+        name = self.state.get("subtitle")
+        return self.path("source", name) if name and os.path.exists(self.path("source", name)) else None
 
     def source_path(self) -> str | None:
         return self.path("source", self.state["source"]) if self.state["source"] else None
@@ -115,12 +144,41 @@ class Project:
             p = self.path("output", name)
             outputs.append({"name": name, "url": self.url("output", name),
                             "size": os.path.getsize(p), "mtime": os.path.getmtime(p)})
+        credits = self.state.get("credits", {})
+        for c in clips:
+            if c["name"] in credits:
+                c["credit"] = credits[c["name"]]
+        settings = self.settings()
+        ai = {
+            "anthropic": bool(settings["anthropic_key"] or os.environ.get("ANTHROPIC_API_KEY")),
+            "pixabay": bool(settings["pixabay_key"] or os.environ.get("PIXABAY_API_KEY")),
+            "whisper": matcher.whisper_available(),
+        }
         return {"source": source, "clips": clips, "scenes": self.state["scenes"],
                 "saved": self.state["saved"], "outputs": outputs, "job": self.job_view(),
-                "workdir": self.root}
+                "workdir": self.root, "subtitle": self.state.get("subtitle") if self.subtitle_path() else None,
+                "recommend": self.state.get("recommend"), "ai": ai}
 
     def job_view(self) -> dict:
         return {k: self.job.get(k) for k in ("kind", "status", "progress", "log", "error", "output")}
+
+    def run_scan(self, source: str, threshold: float, min_length: float, log, progress) -> None:
+        project = self
+        project.state["scenes"] = []
+        project.state["recommend"] = None
+        project.save()
+        thumbs = project.path("thumbs")
+        shutil.rmtree(thumbs, ignore_errors=True)
+        scenes = analyze(source, thumbs, threshold=threshold, min_length=min_length,
+                         progress=progress, log=log)
+        stamp = int(time.time())
+        project.state["scenes"] = [
+            {"s": round(sc.start, 3), "e": round(sc.end, 3),
+             "thumb": project.url("thumbs", os.path.basename(sc.thumb)) + f"?v={stamp}"
+             if sc.thumb else ""}
+            for sc in scenes
+        ]
+        project.save()
 
     # ---- 작업 실행 ----
     def start_job(self, kind: str, work, **extra) -> bool:
@@ -148,6 +206,40 @@ class Project:
 
         threading.Thread(target=target, daemon=True).start()
         return True
+
+
+QUALITY = {"high": (18, "medium"), "normal": (21, "fast"), "draft": (26, "ultrafast")}
+
+
+def make_render_work(project: "Project", segments: list[Segment], subs: SubtitleOptions,
+                     quality: str, shuffle: bool):
+    """영상 만들기 작업 함수와 결과 파일 이름을 만든다."""
+    source = project.source_path()
+    crf, preset = QUALITY.get(quality, QUALITY["high"])
+    stem, ext = os.path.splitext(project.state["source"])
+    suffix = "_미리보기" if quality == "draft" else ""
+    out_name = f"{stem}_한국영상교체{suffix}{ext if ext.lower() in ('.mp4', '.mov', '.mkv') else '.mp4'}"
+    output = project.path("output", out_name)
+
+    def work(log, progress) -> None:
+        tmp_out = project.path("preview", "rendering" + os.path.splitext(output)[1])
+        try:
+            replace_segments(source, segments, tmp_out,
+                             clips_dir=project.path("clips"), subs=subs, shuffle=shuffle,
+                             crf=crf, preset=preset, progress=progress,
+                             log=lambda t: None if t.startswith("완료") else
+                             log(t.replace(project.root + os.sep, "")))
+            os.replace(tmp_out, output)
+            log(f"완료: {out_name}")
+        finally:
+            if os.path.exists(tmp_out):
+                os.unlink(tmp_out)
+
+    return out_name, work
+
+
+def mask_key(key: str | None) -> str:
+    return "" if not key else (key[:4] + "…" + key[-4:] if len(key) > 12 else "설정됨")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -203,6 +295,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(page)
         elif route == "/api/state":
             self.send_json(self.project.snapshot())
+        elif route == "/api/settings":
+            self.send_json(self.settings_view())
         elif route == "/api/job":
             self.send_json(self.project.job_view())
         elif route.startswith("/files/"):
@@ -230,13 +324,15 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/render": self.api_render,
                 "/api/save": self.api_save,
                 "/api/delete": self.api_delete,
+                "/api/settings": self.api_settings,
+                "/api/auto": self.api_auto,
             }.get(route)
             if not handler:
                 return self.send_error_json("없는 주소입니다", 404)
             handler(body)
         except (ValueError, KeyError, TypeError) as exc:
             self.send_error_json(str(exc))
-        except ffmpeg_util.FFmpegError as exc:
+        except (ffmpeg_util.FFmpegError, AIError) as exc:
             self.send_error_json(str(exc), 500)
 
     # ---- 파일 전송 (영상 탐색을 위해 Range 지원) ----
@@ -293,10 +389,12 @@ class Handler(BaseHTTPRequestHandler):
     def upload(self) -> None:
         q = self.query()
         kind = q.get("kind")
-        if kind not in ("source", "clip"):
-            return self.send_error_json("kind 는 source 또는 clip 이어야 합니다")
+        if kind not in ("source", "clip", "subtitle"):
+            return self.send_error_json("kind 는 source, clip, subtitle 중 하나여야 합니다")
         name = safe_name(q.get("name", ""))
         ext = os.path.splitext(name)[1].lower()
+        if kind == "subtitle":
+            return self.upload_subtitle(name, ext)
         allowed = VIDEO_EXTS if kind == "source" else VIDEO_EXTS | IMAGE_EXTS
         if ext not in allowed:
             return self.send_error_json(f"지원하지 않는 파일 형식입니다: {ext or name}")
@@ -340,9 +438,131 @@ class Handler(BaseHTTPRequestHandler):
         project.save()
         self.send_json({"ok": True, "name": name, **info})
 
+    def upload_subtitle(self, name: str, ext: str) -> None:
+        if ext not in (".srt", ".vtt"):
+            return self.send_error_json("자막 파일은 .srt 또는 .vtt 만 올릴 수 있습니다")
+        length = int(self.headers.get("Content-Length") or 0)
+        if not 0 < length <= 20 * 1024 * 1024:
+            return self.send_error_json("자막 파일 크기가 올바르지 않습니다")
+        data = self.rfile.read(length)
+        captions = matcher.parse_subtitles(data.decode("utf-8-sig", errors="replace"))
+        if not captions:
+            return self.send_error_json("자막을 읽을 수 없습니다. SRT/VTT 형식인지 확인하세요.")
+        project = self.project
+        old = project.subtitle_path()
+        if old:
+            os.unlink(old)
+        dest_name = "narration" + ext
+        with open(project.path("source", dest_name), "wb") as f:
+            f.write(data)
+        project.state["subtitle"] = dest_name
+        project.save()
+        self.send_json({"ok": True, "captions": len(captions)})
+
+    def api_settings(self, body: dict) -> None:
+        project = self.project
+        data = project.settings()
+        for key in ("anthropic_key", "pixabay_key", "model"):
+            value = body.get(key)
+            if value is None:
+                continue
+            value = str(value).strip()
+            if key != "model" and value and value == mask_key(data[key]):
+                continue  # 화면에 가려서 보여준 값을 그대로 다시 보낸 경우 → 기존 키 유지
+            data[key] = value
+        project.save_settings(data)
+        self.send_json(self.settings_view())
+
+    def settings_view(self) -> dict:
+        data = self.project.settings()
+        return {"anthropic_key": mask_key(data["anthropic_key"]),
+                "pixabay_key": mask_key(data["pixabay_key"]),
+                "model": data["model"] or DEFAULT_MODEL,
+                "env_anthropic": bool(os.environ.get("ANTHROPIC_API_KEY")),
+                "env_pixabay": bool(os.environ.get("PIXABAY_API_KEY"))}
+
+    def api_auto(self, body: dict) -> None:
+        project = self.project
+        source = project.source_path()
+        if not source:
+            return self.send_error_json("먼저 원본 영상을 올려주세요")
+        settings = project.settings()
+        options = matcher.AutoOptions(
+            use_library=bool(body.get("use_library", True)),
+            use_pixabay=bool(body.get("use_pixabay", True)),
+            min_score=int(body.get("min_score", 50)),
+        )
+        if not options.use_library and not options.use_pixabay:
+            raise ValueError("내 자료 또는 픽사베이 중 하나 이상을 선택하세요")
+        pixabay_key = settings["pixabay_key"] or os.environ.get("PIXABAY_API_KEY", "")
+        if options.use_pixabay and not pixabay_key:
+            raise ValueError("픽사베이를 쓰려면 AI 설정에서 픽사베이 API 키를 입력하세요")
+        if not options.use_pixabay and not ffmpeg_util.list_media(project.path("clips")):
+            raise ValueError("내 자료만 쓰려면 먼저 한국 영상을 올려주세요")
+        want_transcribe = bool(body.get("transcribe"))
+        render_after = bool(body.get("render_after"))
+        subs = self._subs(body)
+        quality = body.get("quality", "high")
+        shuffle = bool(body.get("shuffle"))
+        ai = Claude(settings["anthropic_key"] or None, settings["model"] or None)
+
+        def work(log, progress) -> None:
+            def part(lo, hi):
+                return lambda p: progress(lo + (hi - lo) * p)
+
+            if not project.state["scenes"]:
+                project.run_scan(source, 0.3, 0.6, log, part(0, 0.08))
+            scenes = project.state["scenes"]
+
+            captions: list = []
+            sub_path = project.subtitle_path()
+            if sub_path:
+                captions = matcher.load_subtitles(sub_path)
+                log(f"자막 파일에서 나레이션 {len(captions)}문장을 읽었습니다.")
+            elif want_transcribe:
+                captions = matcher.transcribe(source, log)
+            else:
+                log("나레이션 대본이 없어 화면의 자막을 읽어서 판단합니다.")
+
+            pixabay = None
+            if options.use_pixabay:
+                pixabay = matcher.Pixabay(pixabay_key, project.path("preview", "pixabay_cache"))
+            end = 0.6 if render_after else 1.0
+            result = matcher.recommend(ai, source, scenes, captions, project.path("clips"),
+                                       project.root, options, pixabay, log, part(0.08, end))
+            for rec in result["scenes"]:
+                if rec.get("credit") and rec.get("clip"):
+                    project.state["credits"][rec["clip"]] = rec["credit"]
+            project.state["recommend"] = result
+            picked = {str(r["index"]): r["clip"] for r in result["scenes"] if r.get("clip")}
+            project.state["saved"] = {**project.state.get("saved", {}), "picked": picked}
+            project.save()
+            count = len(picked)
+            log(f"추천 완료: {count}개 장면을 교체하도록 골랐습니다.")
+
+            if render_after and count:
+                segments = normalize([
+                    Segment(scenes[int(i)]["s"], scenes[int(i)]["e"], project.path("clips", clip))
+                    for i, clip in picked.items()])
+                out_name, render = make_render_work(project, segments, subs, quality, shuffle)
+                project.job["output"] = out_name
+                log("추천대로 영상을 만듭니다...")
+                render(log, part(0.6, 1.0))
+
+        if not project.start_job("auto", work):
+            return self.send_error_json("다른 작업이 진행 중입니다", 409)
+        self.send_json({"ok": True})
+
     def api_delete(self, body: dict) -> None:
         name = safe_name(body.get("name", ""))
         kind = body.get("kind")
+        if kind == "subtitle":
+            path = self.project.subtitle_path()
+            if path:
+                os.unlink(path)
+            self.project.state["subtitle"] = None
+            self.project.save()
+            return self.send_json({"ok": True})
         folder = {"clip": "clips", "output": "output"}.get(kind)
         if not folder:
             return self.send_error_json("삭제할 수 없는 종류입니다")
@@ -367,20 +587,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("민감도는 0~1 사이여야 합니다")
 
         def work(log, progress) -> None:
-            project.state["scenes"] = []
-            project.save()
-            thumbs = project.path("thumbs")
-            shutil.rmtree(thumbs, ignore_errors=True)
-            scenes = analyze(source, thumbs, threshold=threshold, min_length=min_length,
-                             progress=progress, log=log)
-            stamp = int(time.time())
-            project.state["scenes"] = [
-                {"s": round(sc.start, 3), "e": round(sc.end, 3),
-                 "thumb": project.url("thumbs", os.path.basename(sc.thumb)) + f"?v={stamp}"
-                 if sc.thumb else ""}
-                for sc in scenes
-            ]
-            project.save()
+            project.run_scan(source, threshold, min_length, log, progress)
 
         if not project.start_job("scan", work):
             return self.send_error_json("다른 작업이 진행 중입니다", 409)
@@ -444,28 +651,8 @@ class Handler(BaseHTTPRequestHandler):
         if not any(s.clip for s in segments) or not all(s.clip for s in segments):
             if not ffmpeg_util.list_media(project.path("clips")):
                 return self.send_error_json("먼저 한국 영상을 올려주세요")
-        subs = self._subs(body)
-        quality = {"high": (18, "medium"), "normal": (21, "fast"), "draft": (26, "ultrafast")}
-        crf, preset = quality.get(body.get("quality", "high"), quality["high"])
-        stem, ext = os.path.splitext(project.state["source"])
-        suffix = "_미리보기" if body.get("quality") == "draft" else ""
-        out_name = f"{stem}_한국영상교체{suffix}{ext if ext.lower() in ('.mp4', '.mov', '.mkv') else '.mp4'}"
-        output = project.path("output", out_name)
-        shuffle = bool(body.get("shuffle"))
-
-        def work(log, progress) -> None:
-            tmp_out = project.path("preview", "rendering" + os.path.splitext(output)[1])
-            try:
-                replace_segments(source, segments, tmp_out,
-                                 clips_dir=project.path("clips"), subs=subs, shuffle=shuffle,
-                                 crf=crf, preset=preset, progress=progress,
-                                 log=lambda t: None if t.startswith("완료") else
-                                 log(t.replace(project.root + os.sep, "")))
-                os.replace(tmp_out, output)
-                log(f"완료: {out_name}")
-            finally:
-                if os.path.exists(tmp_out):
-                    os.unlink(tmp_out)
+        out_name, work = make_render_work(project, segments, self._subs(body),
+                                          body.get("quality", "high"), bool(body.get("shuffle")))
 
         if not project.start_job("render", work, output=out_name):
             return self.send_error_json("다른 작업이 진행 중입니다", 409)

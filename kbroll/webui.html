@@ -119,6 +119,26 @@
   .output .cap b { flex:1 1 100%; font-weight:600; word-break:break-all; }
   a.btn { text-decoration:none; font-size:13px; padding:4px 10px; border-radius:8px; background:var(--accent);
           color:var(--accent-text); font-weight:600; }
+  .aibox { border:1px solid var(--line); background:var(--soft); border-radius:10px; padding:14px 16px; margin-bottom:16px;
+           display:flex; flex-direction:column; gap:10px; }
+  .aibox .title { font-weight:700; }
+  .aibox .log { max-height:140px; background:var(--card); }
+  .chip { display:inline-flex; gap:6px; align-items:center; font-size:13px; background:var(--card);
+          border:1px solid var(--line); border-radius:99px; padding:2px 10px; }
+  .scene .ai { padding:0 8px 6px; font-size:11.5px; line-height:1.4; color:var(--muted); }
+  .scene .ai .flag { color:var(--pick); font-weight:700; }
+  .scene .ai .ok { color:var(--ok); }
+  .scene .ai .pick { color:var(--accent); font-weight:600; }
+  .credit { font-size:11px; color:var(--muted); padding:0 6px 4px; display:block; text-decoration:none; }
+  .credit:hover { text-decoration:underline; }
+  dialog { border:1px solid var(--line); border-radius:12px; background:var(--card); color:var(--text);
+           width:min(520px, calc(100vw - 32px)); padding:20px; }
+  dialog::backdrop { background:rgba(0,0,0,.4); }
+  dialog h3 { margin:0 0 12px; }
+  dialog label { display:block; font-size:14px; margin:10px 0 4px; }
+  dialog input[type=text], dialog input[type=password] { width:100%; font:inherit; padding:7px 10px; border-radius:8px;
+           border:1px solid var(--line); background:var(--bg); color:var(--text); }
+  dialog a { color:var(--accent); }
   .toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:var(--text); color:var(--bg);
            padding:10px 16px; border-radius:10px; font-size:14px; opacity:0; pointer-events:none; transition:opacity .2s; z-index:50;
            max-width:90vw; }
@@ -131,7 +151,22 @@
 <header>
   <h1>🎬 한국 영상 교체기</h1>
   <span class="pill" id="jobPill">대기 중</span>
+  <button class="small" id="openSettings">⚙ AI 설정</button>
 </header>
+<dialog id="settingsDlg">
+  <h3>AI 설정</h3>
+  <p class="muted">키는 이 PC 의 작업 폴더(settings.json)에만 저장됩니다.</p>
+  <label for="setAnthropic">Claude API 키 <span class="muted">— <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> 에서 발급 (사용량만큼 요금)</span></label>
+  <input type="password" id="setAnthropic" autocomplete="off" placeholder="sk-ant-...">
+  <label for="setPixabay">픽사베이 API 키 <span class="muted">— <a href="https://pixabay.com/api/docs/" target="_blank" rel="noopener">pixabay.com/api/docs</a> 에서 무료 발급</span></label>
+  <input type="password" id="setPixabay" autocomplete="off">
+  <label for="setModel">Claude 모델</label>
+  <input type="text" id="setModel" placeholder="claude-opus-5">
+  <div class="row" style="margin-top:16px; justify-content:flex-end">
+    <button id="closeSettings">취소</button>
+    <button class="primary" id="saveSettings">저장</button>
+  </div>
+</dialog>
 
 <main>
   <!-- 1. 올리기 -->
@@ -163,6 +198,32 @@
     <h2><span class="no">2</span>외국 영상 장면 고르기</h2>
     <p class="desc">장면 분석을 누르면 컷 단위로 나뉩니다. 외국 영상이 나오는 장면을 <b>클릭</b>해서 빨간색으로 표시하세요.
       <b>Shift+클릭</b>은 범위 선택입니다. 장면 구분이 안 맞으면 플레이어 아래에서 구간을 직접 추가할 수 있습니다.</p>
+    <div class="aibox" id="aiBox">
+      <div><span class="title">🤖 AI 자동 추천</span>
+        <span class="muted">— 나레이션을 이해해서 외국 영상이나 내용과 안 맞는 장면을 찾고, 내 자료·픽사베이에서 가장 잘 맞는 한국 영상을 골라 넣습니다.</span></div>
+      <div class="row">
+        <span class="muted">나레이션 대본</span>
+        <label class="chip" style="cursor:pointer">📄 자막 파일(SRT/VTT) 올리기<input type="file" id="fileSub" accept=".srt,.vtt" hidden></label>
+        <span id="subInfo" class="muted"></span>
+        <label class="muted"><input type="checkbox" id="aiTranscribe"> 음성 자동 인식</label>
+        <span id="whisperNote" class="muted"></span>
+      </div>
+      <div class="row">
+        <span class="muted">찾을 곳</span>
+        <label class="muted"><input type="checkbox" id="aiLibrary" checked> 내 자료</label>
+        <label class="muted"><input type="checkbox" id="aiPixabay" checked> 픽사베이 무료 영상</label>
+        <label class="muted">맞춤 기준
+          <select id="aiScore"><option value="30">느슨하게</option><option value="50" selected>보통</option><option value="70">엄격하게</option></select>
+        </label>
+        <label class="muted"><input type="checkbox" id="aiRender"> 추천 후 바로 영상 만들기</label>
+      </div>
+      <div class="row">
+        <button class="primary" id="autoBtn">AI 자동 추천 시작</button>
+        <span class="muted" id="aiStatus"></span>
+      </div>
+      <div class="muted" id="aiTopic"></div>
+      <pre class="log" id="aiLog" hidden></pre>
+    </div>
     <div class="row" style="margin-bottom:14px">
       <button class="primary" id="scanBtn">장면 분석</button>
       <label class="muted">나누는 정도
@@ -390,6 +451,8 @@ function renderUploads() {
   $("clipList").replaceChildren(...S.clips.map((c) => el("div", { class: "clip" },
     c.is_image ? el("img", { class: "media", src: c.url, alt: c.name, loading: "lazy" })
                : el("video", { class: "media", src: c.url + "#t=1", muted: true, preload: "metadata" }),
+    c.credit ? el("a", { class: "credit", href: c.credit.url, target: "_blank", rel: "noopener",
+                         title: c.credit.tags || "" }, `Pixabay · ${c.credit.user}`) : null,
     el("div", { class: "cap" },
       el("span", { title: c.name }, c.name),
       el("span", { class: "muted" }, c.is_image ? "사진" : fmt(c.duration, 0)),
@@ -429,10 +492,30 @@ function renderScenes() {
     const card = el("div", { class: "scene" + (picked.has(i) ? " picked" : ""), onclick: (e) => clickScene(i, e.shiftKey) },
       el("img", { src: sc.thumb, alt: fmt(sc.s), loading: "lazy" }),
       el("div", { class: "meta" }, el("span", {}, fmt(sc.s)), el("span", {}, (sc.e - sc.s).toFixed(1) + "초")),
+      aiNote(i),
       clipSelect(picked.get(i) || "", (v) => { picked.set(i, v); saveLater(); }));
     card.dataset.i = i;
     return card;
   }));
+}
+
+function aiNote(i) {
+  const rec = S.recommend?.scenes?.[i];
+  if (!rec) return null;
+  const box = el("div", { class: "ai" });
+  const tips = [rec.narration && "나레이션: " + rec.narration, rec.reason && "판단: " + rec.reason,
+                rec.pick_reason && "선택: " + rec.pick_reason].filter(Boolean);
+  box.title = tips.join("\n");
+  if (rec.replace) {
+    const kind = [rec.foreign && "외국 영상", rec.mismatch && "내용 불일치"].filter(Boolean).join("·") || "교체 필요";
+    box.append(el("span", { class: "flag" }, "AI: " + kind), el("br"));
+    box.append(el("span", {}, rec.wanted || ""));
+    if (rec.clip) box.append(el("br"), el("span", { class: "pick" }, `→ ${rec.clip} (${rec.score}점)`));
+    else if (rec.pick_reason) box.append(el("br"), el("span", {}, "→ " + rec.pick_reason));
+  } else {
+    box.append(el("span", { class: "ok" }, "AI: 그대로 두기"));
+  }
+  return box;
 }
 
 function setPicked(i, on) {
@@ -524,6 +607,66 @@ $("scanBtn").onclick = async () => {
   } catch (e) { toast(e.message); }
 };
 
+/* ---------- AI 자동 추천 ---------- */
+$("openSettings").onclick = async () => {
+  try {
+    const st = await api("/api/settings");
+    $("setAnthropic").value = st.anthropic_key; $("setPixabay").value = st.pixabay_key; $("setModel").value = st.model;
+    $("setAnthropic").placeholder = st.env_anthropic ? "환경변수 ANTHROPIC_API_KEY 사용 중" : "sk-ant-...";
+    $("setPixabay").placeholder = st.env_pixabay ? "환경변수 PIXABAY_API_KEY 사용 중" : "";
+  } catch (e) { toast(e.message); }
+  $("settingsDlg").showModal();
+};
+$("closeSettings").onclick = () => $("settingsDlg").close();
+$("saveSettings").onclick = async () => {
+  try {
+    await api("/api/settings", { anthropic_key: $("setAnthropic").value, pixabay_key: $("setPixabay").value,
+                                 model: $("setModel").value });
+    $("settingsDlg").close(); toast("AI 설정을 저장했습니다."); refresh();
+  } catch (e) { toast(e.message); }
+};
+
+$("fileSub").addEventListener("change", async () => {
+  const f = $("fileSub").files[0]; $("fileSub").value = "";
+  if (!f) return;
+  const res = await fetch(`/api/upload?kind=subtitle&name=${encodeURIComponent(f.name)}`, { method: "PUT", body: f });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return toast(data.error || "자막 업로드 실패");
+  toast(`자막 ${data.captions}문장을 읽었습니다.`); refresh();
+});
+
+function renderAI() {
+  const ai = S.ai || {};
+  $("subInfo").replaceChildren(S.subtitle
+    ? el("span", {}, "✓ 자막 파일 있음 ", el("button", { class: "link", title: "삭제", onclick: async () => {
+        await api("/api/delete", { kind: "subtitle" }); refresh(); } }, "✕"))
+    : "");
+  $("aiTranscribe").disabled = !ai.whisper || !!S.subtitle;
+  $("whisperNote").textContent = S.subtitle ? "" : ai.whisper ? "" : "(음성 인식은 faster-whisper 설치 필요 — 없으면 화면 자막을 읽습니다)";
+  const miss = [];
+  if (!ai.anthropic) miss.push("Claude API 키");
+  if ($("aiPixabay").checked && !ai.pixabay) miss.push("픽사베이 API 키");
+  $("aiStatus").textContent = miss.length ? `⚠ AI 설정에서 ${miss.join(", ")}를 입력하세요.` : "";
+  const rec = S.recommend;
+  $("aiTopic").textContent = rec ? `영상 주제: ${rec.topic} · AI가 교체를 추천한 장면 ${rec.scenes.filter((r) => r.clip).length}개 ` +
+    `(판단: 외국 ${rec.scenes.filter((r) => r.foreign).length} · 불일치 ${rec.scenes.filter((r) => r.mismatch).length})` : "";
+}
+$("aiPixabay").onchange = renderAI;
+
+$("autoBtn").onclick = async () => {
+  if (picked.size && !confirm("AI 추천 결과로 지금 고른 장면을 바꿉니다. 계속할까요?")) return;
+  try {
+    await api("/api/auto", {
+      use_library: $("aiLibrary").checked, use_pixabay: $("aiPixabay").checked,
+      transcribe: $("aiTranscribe").checked && !$("aiTranscribe").disabled,
+      min_score: Number($("aiScore").value), render_after: $("aiRender").checked,
+      subs: subsOptions(), quality: $("quality").value, shuffle: $("shuffle").checked,
+    });
+    $("aiLog").hidden = false; $("aiLog").textContent = "시작합니다…";
+    startPolling();
+  } catch (e) { toast(e.message); }
+};
+
 /* ---------- 3. 자막 ---------- */
 function subsOptions() {
   const mode = document.querySelector("input[name=mode]:checked").value;
@@ -576,7 +719,7 @@ $("renderBtn").onclick = async () => {
 
 function renderJob(job) {
   const pill = $("jobPill");
-  const label = job.kind === "scan" ? "장면 분석" : "영상 만들기";
+  const label = { scan: "장면 분석", auto: "AI 자동 추천", render: "영상 만들기" }[job.kind] || "작업";
   pill.className = "pill";
   if (job.status === "running") { pill.textContent = `${label} ${Math.round(job.progress * 100)}%`; pill.classList.add("run"); }
   else if (job.status === "error") { pill.textContent = `${label} 실패`; pill.classList.add("err"); }
@@ -584,8 +727,14 @@ function renderJob(job) {
   else pill.textContent = "대기 중";
   const busy = job.status === "running";
   $("scanBtn").disabled = busy || !S.source;
+  $("autoBtn").disabled = busy || !S.source;
+  if (job.kind === "auto" && job.status !== "idle") {
+    $("aiLog").hidden = false;
+    $("aiLog").textContent = (job.log || []).join("\n") + (job.error ? "\n⚠ " + job.error : "");
+    $("aiLog").scrollTop = $("aiLog").scrollHeight;
+  }
   $("renderBtn").disabled = busy || !allSegments().length || !S.source;
-  if (job.kind === "render" && job.status !== "idle") {
+  if ((job.kind === "render" || (job.kind === "auto" && job.output)) && job.status !== "idle") {
     $("jobBox").hidden = false;
     $("jobBar").style.width = Math.round(job.progress * 100) + "%";
     $("jobText").textContent = busy ? `만드는 중… ${Math.round(job.progress * 100)}% (영상 길이에 따라 몇 분 걸릴 수 있습니다)`
@@ -605,6 +754,13 @@ function startPolling() {
       clearInterval(polling); polling = null;
       await refresh();
       if (job.status === "done" && job.kind === "scan") toast(`장면 ${S.scenes.length}개로 나눴습니다. 외국 영상 장면을 클릭하세요.`);
+      if (job.kind === "auto") {
+        // 서버가 저장한 추천 결과로 선택을 바꾼다
+        picked = new Map(Object.entries(S.saved?.picked || {}).map(([k, v]) => [Number(k), v]));
+        render();
+        if (job.status === "done") toast(job.output ? "AI 추천대로 영상을 만들었습니다." : "AI 추천이 끝났습니다. 빨간 장면을 확인하세요.");
+        else toast("AI 자동 추천 실패: " + job.error);
+      }
     }
   }, 700);
 }
@@ -627,7 +783,7 @@ let restored = false;
 function render() {
   if (!restored) { restoreSaved(); restored = true; }   // 처음 열 때만 저장된 선택을 불러온다
   renderUploads(); renderPlayer(); renderScenes(); renderManual(); renderMark();
-  renderTimeline(); renderSubs(); renderPreviewClips(); renderOutputs(); renderSummary();
+  renderTimeline(); renderSubs(); renderPreviewClips(); renderOutputs(); renderSummary(); renderAI();
   renderJob(S.job || {});
   for (const id of ["step2", "step3", "step4"]) $(id).classList.toggle("locked", !S.source);
 }

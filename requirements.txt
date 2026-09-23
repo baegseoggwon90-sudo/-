@@ -1,2 +1,6 @@
 # ffmpeg 가 PATH 에 없으면 이 패키지에 포함된 ffmpeg 를 사용합니다.
 imageio-ffmpeg>=0.4.9
+# AI 자동 추천 (Claude API)
+anthropic>=1.8
+# (선택) 음성 자동 인식 — 자막 파일이 없을 때 나레이션을 글자로 바꿉니다. 용량이 커서 기본 설치에서 뺐습니다.
+# faster-whisper>=1.0

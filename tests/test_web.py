@@ -67,3 +67,41 @@ def test_rejects_cross_site_and_bad_uploads(server):
     assert status == 400
     status, _, body = request(base + "/api/render", "POST", b'{"segments": []}')
     assert status == 400 and "원본" in json.loads(body)["error"]
+
+
+def test_settings_are_masked_and_kept(server):
+    base, project = server
+    body = json.dumps({"anthropic_key": "sk-ant-secret-1234567890", "pixabay_key": "pixa-9876543210"}).encode()
+    status, _, data = request(base + "/api/settings", "POST", body)
+    view = json.loads(data)
+    assert status == 200 and "secret" not in view["anthropic_key"] and view["anthropic_key"].endswith("7890")
+    # 가려진 값을 그대로 다시 보내도 원래 키가 유지된다
+    request(base + "/api/settings", "POST", json.dumps({"anthropic_key": view["anthropic_key"]}).encode())
+    assert project.settings()["anthropic_key"] == "sk-ant-secret-1234567890"
+    state = json.loads(request(base + "/api/state")[2])
+    assert state["ai"]["anthropic"] and state["ai"]["pixabay"]
+    assert "sk-ant-secret" not in json.dumps(state)
+
+
+def test_subtitle_upload(server):
+    base, project = server
+    srt = "1\n00:00:01,000 --> 00:00:02,000\n안녕하세요\n".encode()
+    status, _, data = request(base + "/api/upload?kind=subtitle&name=a.srt", "PUT", srt)
+    assert status == 200 and json.loads(data)["captions"] == 1
+    assert json.loads(request(base + "/api/state")[2])["subtitle"] == "narration.srt"
+    assert request(base + "/api/upload?kind=subtitle&name=a.txt", "PUT", srt)[0] == 400
+    assert request(base + "/api/upload?kind=subtitle&name=b.srt", "PUT", b"not a subtitle")[0] == 400
+
+
+def test_auto_requires_source_and_keys(server):
+    base, _ = server
+    status, _, data = request(base + "/api/auto", "POST", b"{}")
+    assert status == 400 and "원본" in json.loads(data)["error"]
+
+
+def test_short_key_mask_does_not_overwrite(server):
+    base, project = server
+    request(base + "/api/settings", "POST", json.dumps({"pixabay_key": "short"}).encode())
+    view = json.loads(request(base + "/api/settings")[2])
+    request(base + "/api/settings", "POST", json.dumps({"pixabay_key": view["pixabay_key"]}).encode())
+    assert project.settings()["pixabay_key"] == "short"
