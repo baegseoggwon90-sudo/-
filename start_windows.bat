@@ -1,0 +1,6 @@
+@echo off
+chcp 65001 > nul
+cd /d "%~dp0"
+python -c "import imageio_ffmpeg" 2>nul || python -m pip install -r requirements.txt
+python -m kbroll gui
+if errorlevel 1 pause

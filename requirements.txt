@@ -1,0 +1,2 @@
+# ffmpeg 가 PATH 에 없으면 이 패키지에 포함된 ffmpeg 를 사용합니다.
+imageio-ffmpeg>=0.4.9
